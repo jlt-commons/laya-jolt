@@ -1,26 +1,35 @@
 # lev
 
-System One decisions — typed questions over a state, answered in one
-forward pass with calibrated probabilities — as one Clojure binary on
-[jolt](https://github.com/jolt-lang/jolt) (Chez Scheme, no JVM). lev runs
-the Laya decision models: same weights, same outputs, the stack reproduces
-the Python package's `Agent.system_one` answer for the README quickstart to
-the fourth decimal it prints, on all three checkpoints of the
-[convaiinnovations/laya](https://huggingface.co/convaiinnovations/laya)
-bundle, and picks the checkpoint per request the way the package's `Router`
-does. (The project was `laya-jolt` until 2026-09-19; the namespaces are
-`lev.*`, the binary `lev-server`, the config `~/.config/lev`, the
-environment `LEV_*`; the checkpoints and the answers' `"model":
-"laya-rl-agent"` keep the model's name.)
+System One decisions — typed questions over a state, answered with
+calibrated probabilities — as one Clojure binary on
+[jolt](https://github.com/jolt-lang/jolt) (Chez Scheme, no JVM), with two
+kinds of model behind the same API:
 
-The models are ModernBERT encoders (RoPE, alternating full/sliding
-attention, a GELU-gated MLP; ModernBERT-large for `english` and `typed-decisions`,
-mmBERT-base for `multilingual`) plus a 2-layer decision head, a scorer, and
-an act head. They do not generate text: they consume a serialized `state`
-and a set of typed questions, and return calibrated typed answers.
+- **the encoders**: the Laya decision models (ModernBERT-large /
+  mmBERT-base with a decision head; `convaiinnovations/laya`, three
+  checkpoints), one forward pass, ~100 ms a call on a laptop, the Python
+  package's answers reproduced to the fourth decimal;
+- **a thinker**: any GGUF chat model through llama.cpp, linked into the
+  binary. It reads the state and the question, thinks, and its candidate
+  answers are scored by their token log probabilities. Seconds a
+  question, and right where the encoders are not: on the adversarial
+  authored144 set (`bench/`) MiniCPM5-2B answers 97% with thinking
+  against the encoders' 61–76%.
 
-Everything is f32 end to end. F16 checkpoint weights are widened to f32 once,
-during `prepare`, so the numerics match the torch CPU oracle exactly.
+A request names the model (`"model": "english"` or `"minicpm5"`) or is
+routed by content to a checkpoint; a confidence gate can answer on the
+encoder and escalate only what it is unsure about to the thinker.
+Constraints tie a call's questions together; workflows package a use
+case; von's composable patterns (route, composite score, two-stage
+choice) and its `decide`/`judge`/`rate` are there as a library and over
+HTTP.
+
+The encoders are f32 end to end: F16 checkpoint weights are widened once,
+during `prepare`, so the numerics match the torch CPU oracle. (The project
+was `laya-jolt` until 2026-09-19; the namespaces are `lev.*`, the binary
+`lev-server`, the config `~/.config/lev`, the environment `LEV_*`; the
+checkpoints and the answers' `"model": "laya-rl-agent"` keep the model's
+name.)
 
 ## Getting the checkpoints
 
@@ -69,6 +78,22 @@ and point `LAYA_HOME` at it (or `jolt -M:prepare --laya DIR --out data`).
 under the data root (`data/`, `data/typed-decisions`, `data/multilingual`);
 `--model NAME` converts one. It refuses a root that lacks any of the five
 files and says so.
+
+### A thinker's model
+
+Any chat GGUF llama.cpp loads. The one measured here is
+[openbmb/MiniCPM5-2B-GGUF](https://huggingface.co/openbmb/MiniCPM5-2B-GGUF)
+(2.5B, Apache-2.0, a thinking mode in its chat template): `Q8_0` is 2.7 GB,
+`Q4_K_M` 1.6 GB.
+
+```
+hf download openbmb/MiniCPM5-2B-GGUF MiniCPM5-2B-Q8_0.gguf --local-dir ~/models
+```
+
+Then name it in `~/.config/lev/config.edn` (`:thinkers`, below) or pass
+`--thinker ~/models/MiniCPM5-2B-Q8_0.gguf` / `LEV_THINKER`. The prompt
+format is ChatML with MiniCPM's `<think>` switch; another model family
+needs its own template (`lev.think/defaults`).
 
 ## Build and run
 
@@ -146,6 +171,23 @@ variable > `config.edn` > default**. `config.edn` lives in
 `--workflows` and `LEV_WORKFLOWS` are the exception to "adds": they name
 exactly the directories to scan, replacing the defaults, so a test or a
 one-off run is isolated from whatever is in `~/.config/lev`.
+
+### Thinkers
+
+```clojure
+{:thinkers {"minicpm5" {:model "/Users/me/models/MiniCPM5-2B-Q8_0.gguf"
+                        :thinking true          ; think before answering (a request can override)
+                        :max-think-tokens 1024  ; the budget; the thought is closed when it runs out
+                        :n-ctx 4096 :n-gpu-layers -1 :threads 0   ; llama.cpp: context, layers on the GPU (-1 all), threads (0 = its default)
+                        :temperature 1.0 :top-p 0.95 :min-p 0.0 :seed 42}}   ; sampling of the thought
+ :max-thinkers 1}                                ; resident at once (each is GBs)
+```
+
+Each entry is a model name a request can ask for. `--thinker PATH` or
+`LEV_THINKER` adds one named `thinker`. Thinkers are loaded on first use,
+never chosen by content routing, and listed by `GET /v1/models`. Without
+the llm native (`jolt llama`) or the GGUF on disk a thinker is listed as
+unavailable and a request for it is a 503.
 
 ## Context: what the model sees
 
@@ -305,9 +347,9 @@ violated constraints (listed in `violations`), or fails when
 `on_infeasible` is `raise`. The bundled `email` workflow ties `needs_reply`
 to `is_spam` and `is_phishing`.
 
-Bundled, their questions byte-identical to the Python package's presets
-(`golden/presets.edn`); `email` adds constraints the Python package has no
-equivalent of:
+Bundled: five with questions byte-identical to the Python package's presets
+(`golden/presets.edn`; `email` adds constraints the Python package has no
+equivalent of) and `security` from von:
 
 | workflow | input | asks |
 |---|---|---|
@@ -317,6 +359,7 @@ equivalent of:
 | `guard` | `{"prompt"}` or a string | jailbreak, prompt injection, sensitive data, harm severity, topic |
 | `moderation` | `{"post"}` or a string | toxic, harassment, threat, spam, severity |
 | `llm-router` | `{"request"}` or a string | difficulty, domain, needs tools, is sensitive (routing *your* LLM traffic; `lev.router` picks Laya checkpoints) |
+| `security` | `{"event"}` or a string | event type, active threat, severity (von's security preset), with constraints: benign is no threat, a threat is at least elevated |
 
 ## HTTP API
 
@@ -344,7 +387,25 @@ GET  /health              -> {"status": "ok", "model": "laya-rl-agent", "loaded"
 ```
 
 Questions and answers have the shapes the Python `Agent.system_one` uses
-(choice / score / noul, plus the `action.act_probability` extension).
+(choice / score / noul, plus the `action.act_probability` extension on the
+encoders' answers). A thinker answers in the same shapes without `action`,
+with a `"thinking": {"enabled", "tokens", "max_tokens"}` report and, on
+request (`"thought": true`), each answer's reasoning under `"thought"`;
+`"thinking": false` asks it to answer at once (~150 ms on a GPU, 74% on
+authored144 against 97% with thinking).
+
+```
+POST /v1/systemone {"state": ..., "questions": {...}, "model": "minicpm5", "thinking": true, "thought": false}
+POST /v1/systemone {"state": ..., "questions": {...}, "escalate": {"model": "minicpm5", "threshold": 0.8, "thinking": true}}
+                   -> the encoder's answers, the ones below the threshold replaced by the thinker's, plus
+                      "escalation": {"threshold", "model", "escalated": [ids], "usage": the thinker's}
+POST /v1/patterns/confidence-gate   systemone body + "threshold"          -> {"automatic": {...}, "escalate": {...}, "response": {...}}
+POST /v1/patterns/composite-score   systemone body + "weights" {id: w}    -> {"score": 0..1, "breakdown": {...}, "response": {...}}
+POST /v1/patterns/two-stage-choice  {"state", "taxonomy": {category: {option: description}}} -> {"category", "choice", "combined_confidence", ...}
+```
+
+`escalate` also works on a workflow request; constraints then decide over
+the merged answers.
 `model` is either absent (or the engine's own name, `laya-rl-agent`) to
 route by content, or a checkpoint name / alias (`english`, `multilingual`, `typed-decisions`, `en`,
 `ml`, ...) to pick one; `lang` (`"de"`, `"en-GB"`) and `task`
@@ -409,11 +470,33 @@ first use and keeping `:max-loaded` resident:
 (def h (server/handler rt {:workflows (lev.workflows/load-workflows ["workflows"])}))
 ```
 
+The one-question conveniences and the patterns, as a library (`lev.api`,
+`lev.patterns`; `agent` is an agent or a router):
+
+```clojure
+(require '[lev.api :as api] '[lev.patterns :as pat] '[lev.router :as router])
+(def rt (router/make-router {:data "data" :thinkers {"minicpm5" {:model "/Users/me/models/MiniCPM5-2B-Q8_0.gguf"}}}))
+
+(api/decide rt "Database replication lag exceeded 45 seconds." {"infrastructure" "servers, network" "billing" "invoices"})
+;; => {"type" "choice" "choice" "infrastructure" "probabilities" {...} "confidence" 0.83 "action" {...}}
+(api/judge rt "Connection pool exhausted; handshakes timing out." "Is this blocking customers?")   ; => 0.9412
+(api/rate rt "Memory at 98%, OOM killer active." ["nominal" "degraded" "critical"])                ; => the score answer
+(api/decide rt state choices instructions {:model "minicpm5" :thinking true})                      ; the thinker
+
+(pat/confidence-gate rt state questions {:threshold 0.85})           ; {"automatic" .. "escalate" .. "response" ..}
+(pat/escalate rt state questions {:threshold 0.8 :model "minicpm5"}) ; the gate, with the escalated questions re-asked
+(pat/route rt event (api/choice "Dispute action?" {"refund" "" "escalate" ""}) {"refund" process-refund "escalate" notify-fraud} {})
+(pat/composite-score rt telemetry questions {:weights {"severity" 2.0 "is_threat" 3.0}})   ; {"score" 0.91 ...}
+(pat/two-stage-choice rt "Postgres replica lag" {"cloud" {"aws" "..." "gcp" "..."} "database" {"postgres" "..." "redis" "..."}} {})
+```
+
 ### As a binary
 
 `jolt binary` runs `jolt build -m lev.server -o lev-server` with the C
-kernels linked in statically, then runs `./lev-server --self-test` against
-`golden/`. The suite runs interpreted, and a compiler release can build
+kernels and llama.cpp (`jolt llama`: the pinned tag, static, Metal on mac)
+linked in, then runs `./lev-server --self-test` against `golden/`; with a
+thinker configured the self-test also asks it one question, which proves
+the link. The suite runs interpreted, and a compiler release can build
 the tree wrong where the interpreter runs it right (jolt 0.8.9 miscompiled a
 `reduce` whose accumulator starts as `nil` and is tested with `nil?`, the
 pattern `lev.tokenizer/lowest-ranked-pair` uses; 0.8.10 fixed it), so the
@@ -435,15 +518,24 @@ x86_64, with `golden/` and `workflows/` alongside, built and self-tested by
 push, fetching the three checkpoints from the Hub at the revision `golden/`
 was dumped from (`.github/actions/setup`).
 
-## Accuracy
+## Speed or accuracy
 
-`bench/` runs a prepared checkpoint on von's authored144 set (144
-adversarial three-way decisions) and records how the alternatives do on
-the same cases: laya `english` 61%, `typed-decisions` 67%, von-1.0 (an NLI
-head on the same ModernBERT-large encoder) 76%, a 2.5B decoder answering
-directly 74%, the same decoder with ~300 tokens of thinking 97% at 3 s a
-case. The gap to a hosted generative decision API is the reasoning budget,
-not the encoder; see [bench/README.md](bench/README.md).
+`bench/` runs any configured model on von's authored144 set (144
+adversarial three-way decisions):
+
+```
+jolt -M bench/authored144.clj                                   # english: 61%, ~120 ms a case
+jolt -M bench/authored144.clj --model typed-decisions            # 67%
+jolt -M bench/authored144.clj --model minicpm5 --thinking false  # 74%, ~150 ms a case (Metal)
+jolt -M bench/authored144.clj --model minicpm5                   # 97%, seconds a case
+```
+
+The gap to a hosted generative decision API is the reasoning budget, not
+the encoder: the same 2.5B model answering at once is no better than an
+NLI encoder (von-1.0, 76%). Pick per request: `model` names the encoder or
+the thinker, `thinking` the budget, `escalate` the gate that spends it
+only on the unsure answers. Numbers, alternatives and the method are in
+[bench/README.md](bench/README.md).
 
 ## Native dependencies
 
@@ -455,6 +547,17 @@ the build task branches on OS.
   a pthread pool of their own (`LEV_THREADS`). Attention calls
   `cblas_sgemm` through a pointer the Clojure side hands it, so the library
   links against no BLAS.
+- **llama.cpp** — `native/liblev_llm.dylib` / `.so` and `liblev_llm.a`,
+  built by `jolt llama`: llama.cpp cloned at its pinned tag into
+  `native/llama.cpp` and built static (`cmake`; Metal with the shader
+  library embedded on mac, CPU elsewhere) behind `native/lev_llm.c`, a
+  flat C face jolt.ffi binds (`lev.llm`). Optional: without it the
+  encoders run and thinkers are unavailable. For `jolt build` the archive
+  is force-loaded and libc++ and the Metal, Foundation, MetalKit and
+  Accelerate frameworks are linked through `lib<Name>.tbd` symlinks the
+  build script makes under `native/frameworks/` (how a `deps.edn`
+  `:static {:lib}` can name a framework); the binary depends only on
+  system frameworks.
 - **ICU** — `libicucore.dylib` on mac (unguarded symbols in the system dylib),
   `libicuuc.so.<ver>` on linux. The tokenizers call `unorm2` (NFC) and the
   `u_charType` / `u_isUWhiteSpace` classifiers; language detection and the
