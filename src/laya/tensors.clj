@@ -4,8 +4,10 @@
   A tensor is {:p ptr :shape [rows cols] :size n} — raw pointers into ffi
   buffers, row-major, little-endian f32. Matmuls call cblas_sgemm through
   the blas native (Accelerate on mac, OpenBLAS on linux); the elementwise
-  and reduction ops are native/laya_kernels.c. Nothing per-element crosses
-  back into Clojure."
+  and reduction ops are native/laya_kernels.c, whose row-wise kernels and
+  attention run on the library's own thread pool (`threads`,
+  `set-threads!`, LAYA_THREADS). Nothing per-element crosses back into
+  Clojure."
   (:require [clojure.java.io :as io]
             [jolt.ffi :as ffi]))
 
@@ -50,6 +52,29 @@
 (ffi/defcfn add-qtype-bias* "lla_add_qtype_bias"
   [:pointer :pointer :pointer :int64 :int64 :pointer] :void)
 (ffi/defcfn softmax* "lla_softmax" [:pointer :int64 :int64 :pointer] :void)
+(ffi/defcfn attention* "lla_attention"
+  [:pointer :pointer :pointer :pointer :pointer :int64 :int64 :int64 :float :int64 :int64 :pointer] :void)
+(ffi/defcfn threads* "lla_threads" [] :int)
+(ffi/defcfn set-threads* "lla_set_threads" [:int] :void)
+
+(defn threads
+  "Threads the kernel pool runs on (the caller included): LAYA_THREADS,
+  else the online processors, until set-threads! says otherwise."
+  []
+  (threads*))
+
+(defn set-threads!
+  "Resize the kernel pool; 1 runs everything on the calling thread. The
+  results do not depend on it, only the time."
+  [n]
+  (set-threads* (int (max 1 n)))
+  n)
+
+(def ^:private sgemm-address
+  "cblas_sgemm as the kernel library reaches it: the same BLAS entry the
+  binding above calls, found once through the declared natives."
+  (delay (or (ffi/find-symbol "cblas_sgemm")
+             (throw (ex-info "cblas_sgemm not found in the loaded natives" {})))))
 
 ;; --- tensor plumbing ----------------------------------------------------------
 
@@ -270,60 +295,40 @@
     (masked-softmax* (:p scores) (:p allowed) (long cols) (long rows) (long cols) (:p out))
     out))
 
+(def full-attention-block
+  "Query rows per task on a full-attention layer: 128 gives 16 heads x 4
+  blocks at L=512 for the pool, with [128 x L] score blocks per thread."
+  128)
+
 (defn attention!
   "softmax(scale * Q K^T over the allowed keys) V for every head. q/k/v
   head-major [H*L x hd] (lla_split_qkv's layout), allowed [L x L] bytes ->
-  token-major ctx [L x (H*hd)], written into `ctx`; S and P are score
-  buffers of at least [min(L, block) x min(L, block + 2*window)], or
-  [L x L] for the full path.
+  token-major ctx [L x (H*hd)], written into `ctx`.
 
-  The two products per head are sgemm calls, the same two gemms torch's
-  math-path SDPA runs: each head's q/k/v block is already contiguous, and
-  P V lands straight in the head's columns of ctx through ldc = H*hd. Only
-  the masked softmax is a C loop. A query row with no allowed key (padding
-  under a window) stays zero, as lla_masked_softmax leaves its P row zero.
+  lla_attention runs (head, query block) tasks on the kernel pool, each
+  two sgemm calls (through the cblas_sgemm the library is handed, the
+  same two gemms torch's math-path SDPA runs; P V lands straight in the
+  head's columns of ctx through ldc = H*hd) around a masked softmax on
+  the thread's scratch block. A query row with no allowed key (padding
+  under a window) stays zero.
 
   With a `window` (a sliding layer) the queries go in blocks of 2*window
   rows and each block only scores the keys within window of it, so an
   L=1024 layer touches 256 keys per query instead of 1024. The mask is
   still applied inside the block, so the band is only a saving, never the
-  semantics; the full path is one block of everything."
-  [ctx S P qh kh vh allowed H L hd scale window]
-  (let [d (* H hd)
-        block (if (neg? window) L (max 1 (* 2 window)))
-        reach (if (neg? window) 0 window)
-        head-bytes (* 4 L hd)]
-    (dotimes [h H]
-      (loop [i0 0]
-        (when (< i0 L)
-          (let [i1 (min L (+ i0 block))
-                k0 (max 0 (- i0 reach))
-                k1 (min L (+ i1 reach))
-                rows (- i1 i0)
-                cols (- k1 k0)
-                qoff (+ (* h head-bytes) (* 4 i0 hd))
-                koff (+ (* h head-bytes) (* 4 k0 hd))]
-            (cblas-sgemm* RowMajor NoTrans Trans
-                          (long rows) (long cols) (long hd)
-                          (float scale) (at-offset qh qoff) (long hd)
-                          (at-offset kh koff) (long hd)
-                          0.0 (:p S) (long cols))
-            (masked-softmax* (:p S) (at-offset allowed (+ (* i0 L) k0)) (long L)
-                             (long rows) (long cols) (:p P))
-            (cblas-sgemm* RowMajor NoTrans NoTrans
-                          (long rows) (long hd) (long cols)
-                          1.0 (:p P) (long cols)
-                          (at-offset vh koff) (long hd)
-                          0.0 (at-offset ctx (* 4 (+ (* i0 d) (* h hd)))) (long d))
-            (recur i1)))))
-    ctx))
+  semantics; the full path scores every key in blocks of
+  full-attention-block rows."
+  [ctx qh kh vh allowed H L hd scale window]
+  (attention* @sgemm-address (:p qh) (:p kh) (:p vh) (:p allowed)
+              (long H) (long L) (long hd) (float scale) (long window) (long full-attention-block)
+              (:p ctx))
+  ctx)
 
 (defn attention
-  "attention! into fresh buffers; see attention!."
+  "attention! into a fresh context; see attention!."
   ([qh kh vh allowed H L hd scale] (attention qh kh vh allowed H L hd scale -1))
   ([qh kh vh allowed H L hd scale window]
-   (attention! (make [L (* H hd)]) (make [L L]) (make [L L])
-               qh kh vh allowed H L hd scale window)))
+   (attention! (make [L (* H hd)]) qh kh vh allowed H L hd scale window)))
 
 (defn add-qtype!
   "h += type_emb[qtype] per row (in place). h [n x d], bias [3 x d]."

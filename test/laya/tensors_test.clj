@@ -431,6 +431,44 @@
     (is (< (err got (want false)) 1e-5) "weight-only layernorm")
     (is (< (err got-b (want true)) 1e-5) "layernorm with bias")))
 
+;; --- the kernel thread pool -------------------------------------------------
+
+(deftest kernels-are-bit-identical-on-any-thread-count
+  ;; the pool only changes the schedule: every (head, block) or row task
+  ;; runs the same arithmetic in the same order, so the bytes must not
+  ;; move with the thread count, and one thread must equal the serial
+  ;; result the double-precision references above pin
+  (let [H 16 L 300 hd 64 d (* H hd) window 64 scale 0.125
+        mk (fn [seed n shape] (t/reshape (t/from-floats (lcg-floats seed n)) shape))
+        qh (mk 51 (* H L hd) [(* H L) hd])
+        kh (mk 52 (* H L hd) [(* H L) hd])
+        vh (mk 53 (* H L hd) [(* H L) hd])
+        att (t/from-bytes (concat (repeat 290 1) (repeat 10 0)) [1 L])
+        full (t/allowed-mask att 0 L -1)
+        slid (t/allowed-mask att 0 L window)
+        x (mk 54 (* L 600) [L 600])
+        lx (mk 55 (* L d) [L d])
+        w (t/from-floats (map inc (lcg-floats 56 d)))
+        run (fn [] {:full (t/to-floats (t/attention qh kh vh full H L hd scale))
+                    :slid (t/to-floats (t/attention qh kh vh slid H L hd scale window))
+                    :sw (t/to-floats (t/swiglu x 300))
+                    :ln (t/to-floats (t/layernorm lx w 1e-5))})
+        before (t/threads)]
+    (is (pos? before) "the pool has a size before anyone asks")
+    (try
+      (t/set-threads! 1)
+      (is (= 1 (t/threads)))
+      (let [one (run)]
+        (is (= (* L d) (count (:full one))))
+        (doseq [n [2 3 8]]
+          (t/set-threads! n)
+          (is (= n (t/threads)))
+          (let [many (run)]
+            (doseq [k [:full :slid :sw :ln]]
+              (is (= (get one k) (get many k)) (str n " threads: " (name k)))))))
+      (finally (t/set-threads! before)))
+    (is (= before (t/threads)))))
+
 ;; --- batched forward: B padded rows through one gemm stream --------------
 
 (deftest batched-forward-equals-row-forwards

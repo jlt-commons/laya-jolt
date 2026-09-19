@@ -56,11 +56,11 @@
   instead of each taking ~45 MB of fresh (zeroed, page-faulted) memory per
   layer, which cost ~7 ms a layer at L=512, a fifth of the forward. The
   rows are stacked, [B*L x d], so every gemm reads the weights once for
-  the whole batch; only attention goes row by row and its buffers are per
-  row. Each kernel writes every element of its output, so nothing needs
-  zeroing between uses. The residual stream alternates between :res0 and
-  :res1 so a layer never writes into the tensor it was given
-  (`next-residual`)."
+  the whole batch; only attention goes row by row and its head buffers
+  are per row (its score blocks live with the kernel pool). Each kernel
+  writes every element of its output, so nothing needs zeroing between
+  uses. The residual stream alternates between :res0 and :res1 so a layer
+  never writes into the tensor it was given (`next-residual`)."
   [cfg B L]
   (let [n (* B L)
         d (:hidden-size cfg)
@@ -73,8 +73,7 @@
      :norm (t/make [n d]) :qkv (t/make [n (* 3 d)])
      :qh (t/make [(* H L) hd]) :kh (t/make [(* H L) hd]) :vh (t/make [(* H L) hd])
      :ctx (t/make [n d]) :proj (t/make [n d]) :h2 (t/make [n d])
-     :ff (t/make [n ff]) :sw (t/make [n mid]) :mo (t/make [n d])
-     :S (t/make [L L]) :P (t/make [L L])}))
+     :ff (t/make [n ff]) :sw (t/make [n mid]) :mo (t/make [n d])}))
 
 (defn- next-residual
   "The residual buffer that is not h: h came from the other one, or from
@@ -87,7 +86,7 @@
   heads, optionally rope them, and write its context into its rows of
   the workspace's :ctx. `allowed-for` gives row b's [L x L] mask."
   [cfg qkv allowed-for rope window ws]
-  (let [{:keys [B L qh kh vh ctx S P]} ws
+  (let [{:keys [B L qh kh vh ctx]} ws
         H (:num-heads cfg)
         hd (:head-dim cfg)]
     (dotimes [b B]
@@ -96,7 +95,7 @@
       (when-let [[cos-t sin-t] rope]
         (t/rope-apply! qh cos-t sin-t H L hd)
         (t/rope-apply! kh cos-t sin-t H L hd))
-      (t/attention! (t/rows ctx (* b L) L) S P qh kh vh (allowed-for b)
+      (t/attention! (t/rows ctx (* b L) L) qh kh vh (allowed-for b)
                     H L hd (/ 1.0 (Math/sqrt hd)) window))
     ctx))
 

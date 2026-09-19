@@ -43,9 +43,9 @@
                   (empty? (fs/modified-since kern-lib ["native/laya_kernels.c"]))
                   (empty? (fs/modified-since kern-archive ["native/laya_kernels.c"])))
            (println "kernels: up to date -" kern-lib kern-archive)
-           (do (shell "cc" "-O2" "-std=c11" "-shared" "-fPIC"
+           (do (shell "cc" "-O2" "-std=c11" "-pthread" "-shared" "-fPIC"
                       "native/laya_kernels.c" "-o" kern-lib)
-               (shell "cc" "-O2" "-std=c11" "-c" "-fPIC"
+               (shell "cc" "-O2" "-std=c11" "-pthread" "-c" "-fPIC"
                       "native/laya_kernels.c" "-o" "native/laya_kernels.o")
                (shell "ar" "rcs" kern-archive "native/laya_kernels.o")
                (fs/delete-if-exists "native/laya_kernels.o")

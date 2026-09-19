@@ -10,10 +10,168 @@
  * asked (macOS exposes them regardless). Must precede every include. */
 #define _POSIX_C_SOURCE 200809L
 #define _FILE_OFFSET_BITS 64
+/* sysconf(_SC_NPROCESSORS_ONLN) is an extension both libcs hide under a
+ * strict POSIX request */
+#define _DARWIN_C_SOURCE 1
+#define _GNU_SOURCE 1
 #include <math.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+/* ---------------- the thread pool ---------------- */
+
+/* The row-wise kernels (layernorm, swiglu) and attention (heads x query
+ * blocks) are embarrassingly parallel, and the caller is single-threaded
+ * Scheme; the gemms already use every core through the BLAS. So the
+ * library keeps its own pool: n-1 worker pthreads plus the calling
+ * thread, one job at a time (inference is serialized behind the server's
+ * lock), tasks handed out through an atomic counter so a slow one does
+ * not hold the others up. A task writes only its own rows or columns, so
+ * a job needs no lock inside, and the arithmetic of every task is the
+ * same whatever the schedule: the result is bit-identical on any thread
+ * count (tensors_test pins this). The workers never touch a Scheme
+ * object, so the collector does not know they exist.
+ *
+ * Size: LAYA_THREADS, else the online processors; lla_set_threads changes
+ * it (1 = everything on the caller). Per-thread scratch (attention's
+ * score blocks) lives with the pool and grows on demand. */
+
+typedef void (*lla_task_fn)(void *ctx, int64_t task, int thread);
+
+static struct {
+    int n;                       /* threads including the caller; 0 = not started */
+    pthread_t *workers;          /* n-1 of them */
+    pthread_mutex_t mu;
+    pthread_cond_t start, done;
+    uint64_t generation;
+    int stop;
+    lla_task_fn fn;
+    void *ctx;
+    int64_t ntasks;
+    atomic_int_least64_t next;
+    int finished;
+    void **scratch;
+    size_t *scratch_size;
+} pool = {0, NULL, PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER,
+          PTHREAD_COND_INITIALIZER, 0, 0, NULL, NULL, 0, 0, 0, NULL, NULL};
+
+static void pool_work(int thread) {
+    int64_t i;
+    while ((i = atomic_fetch_add(&pool.next, 1)) < pool.ntasks) pool.fn(pool.ctx, i, thread);
+}
+
+static void *pool_worker(void *arg) {
+    int thread = (int)(intptr_t)arg;
+    uint64_t seen = 0;
+    for (;;) {
+        pthread_mutex_lock(&pool.mu);
+        while (pool.generation == seen && !pool.stop) pthread_cond_wait(&pool.start, &pool.mu);
+        if (pool.stop) {
+            pthread_mutex_unlock(&pool.mu);
+            return NULL;
+        }
+        seen = pool.generation;
+        pthread_mutex_unlock(&pool.mu);
+        pool_work(thread);
+        pthread_mutex_lock(&pool.mu);
+        if (++pool.finished == pool.n - 1) pthread_cond_signal(&pool.done);
+        pthread_mutex_unlock(&pool.mu);
+    }
+}
+
+static int default_threads(void) {
+    const char *env = getenv("LAYA_THREADS");
+    if (env && *env) {
+        int n = atoi(env);
+        if (n > 0) return n;
+    }
+#ifdef _SC_NPROCESSORS_ONLN
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return n > 0 ? (int)n : 1;
+#else
+    return 1;
+#endif
+}
+
+static void pool_stop(void) {
+    if (pool.n == 0) return;
+    pthread_mutex_lock(&pool.mu);
+    pool.stop = 1;
+    pthread_cond_broadcast(&pool.start);
+    pthread_mutex_unlock(&pool.mu);
+    for (int i = 0; i < pool.n - 1; i++) pthread_join(pool.workers[i], NULL);
+    free(pool.workers);
+    for (int i = 0; i < pool.n; i++) free(pool.scratch[i]);
+    free(pool.scratch);
+    free(pool.scratch_size);
+    pool.workers = NULL;
+    pool.scratch = NULL;
+    pool.scratch_size = NULL;
+    pool.n = 0;
+    pool.stop = 0;
+}
+
+static void pool_start(int n) {
+    if (n < 1) n = 1;
+    pool.n = n;
+    pool.workers = calloc((size_t)(n > 1 ? n - 1 : 1), sizeof(pthread_t));
+    pool.scratch = calloc((size_t)n, sizeof(void *));
+    pool.scratch_size = calloc((size_t)n, sizeof(size_t));
+    for (int i = 0; i < n - 1; i++)
+        pthread_create(&pool.workers[i], NULL, pool_worker, (void *)(intptr_t)(i + 1));
+}
+
+/* the pool's size, starting it on first use */
+int lla_threads(void) {
+    if (pool.n == 0) pool_start(default_threads());
+    return pool.n;
+}
+
+void lla_set_threads(int n) {
+    pool_stop();
+    pool_start(n);
+}
+
+/* run fn over ntasks tasks on every thread, the caller included; returns
+ * when all are done */
+static void lla_run(lla_task_fn fn, void *ctx, int64_t ntasks) {
+    if (pool.n == 0) pool_start(default_threads());
+    if (pool.n == 1 || ntasks <= 1) {
+        for (int64_t i = 0; i < ntasks; i++) fn(ctx, i, 0);
+        return;
+    }
+    pthread_mutex_lock(&pool.mu);
+    pool.fn = fn;
+    pool.ctx = ctx;
+    pool.ntasks = ntasks;
+    atomic_store(&pool.next, 0);
+    pool.finished = 0;
+    pool.generation++;
+    pthread_cond_broadcast(&pool.start);
+    pthread_mutex_unlock(&pool.mu);
+    pool_work(0);
+    pthread_mutex_lock(&pool.mu);
+    while (pool.finished < pool.n - 1) pthread_cond_wait(&pool.done, &pool.mu);
+    pthread_mutex_unlock(&pool.mu);
+}
+
+/* thread-private scratch of at least `bytes`, kept between jobs */
+static void *lla_scratch(int thread, size_t bytes) {
+    if (pool.scratch_size[thread] < bytes) {
+        free(pool.scratch[thread]);
+        pool.scratch[thread] = malloc(bytes);
+        pool.scratch_size[thread] = bytes;
+    }
+    return pool.scratch[thread];
+}
+
+/* rows [lo, hi) of a row-parallel kernel: the task's share of n rows in
+ * chunks of `per` */
+#define LLA_ROW_TASKS(n, per) (((n) + (per) - 1) / (per))
 
 /* ---------------- gather + layernorm ---------------- */
 
@@ -32,9 +190,17 @@ void lla_gather_rows(const float *emb, const int64_t *ids, int64_t n, int64_t d,
  * are double, in four lanes so the loops vectorize (an f32 or f64
  * reduction is not reassociated at -O2 unless it is spelled out), and the
  * normalize pass is f32 like torch's. */
-void lla_layernorm(const float *x, const float *w, const float *b, int64_t n,
-                   int64_t d, float eps, float *out) {
-    for (int64_t i = 0; i < n; i++) {
+struct layernorm_job { const float *x, *w, *b; int64_t n, d; float eps; float *out; };
+
+static void layernorm_rows(void *ctx, int64_t task, int thread) {
+    (void)thread;
+    struct layernorm_job *j = ctx;
+    const float *x = j->x, *w = j->w, *b = j->b;
+    int64_t d = j->d;
+    float eps = j->eps;
+    float *out = j->out;
+    int64_t lo = task * 8, hi = lo + 8 < j->n ? lo + 8 : j->n;
+    for (int64_t i = lo; i < hi; i++) {
         const float *xi = x + i * d;
         float *oi = out + i * d;
         double s[4] = {0, 0, 0, 0};
@@ -65,6 +231,12 @@ void lla_layernorm(const float *x, const float *w, const float *b, int64_t n,
                 oi[j2] = (xi[j2] - meanf) * inv * w[j2];
         }
     }
+}
+
+void lla_layernorm(const float *x, const float *w, const float *b, int64_t n,
+                   int64_t d, float eps, float *out) {
+    struct layernorm_job j = {x, w, b, n, d, eps, out};
+    lla_run(layernorm_rows, &j, LLA_ROW_TASKS(n, 8));
 }
 
 /* ---------------- fast math ---------------- */
@@ -148,16 +320,27 @@ void lla_silu(const float *x, int64_t n, float *out) {
 /* SwiGLU with erf-gelu on the gate input, torch ModernBertMLP:
  * out = act(Wi(x)[0:mid]) * Wi(x)[mid:2*mid]. in = [n x 2*mid] -> out [n x mid].
  * This is [L x 2624] erfs per layer, so it uses gelu_fast (vectorized). */
-void lla_swiglu(const float *x, int64_t n, int64_t mid, float *out) {
-    for (int64_t i = 0; i < n; i++) {
-        const float *xi = x + i * 2 * mid;
-        float *oi = out + i * mid;
+struct swiglu_job { const float *x; int64_t n, mid; float *out; };
+
+static void swiglu_rows(void *ctx, int64_t task, int thread) {
+    (void)thread;
+    struct swiglu_job *sj = ctx;
+    int64_t mid = sj->mid;
+    int64_t lo = task * 4, hi = lo + 4 < sj->n ? lo + 4 : sj->n;
+    for (int64_t i = lo; i < hi; i++) {
+        const float *xi = sj->x + i * 2 * mid;
+        float *oi = sj->out + i * mid;
         for (int64_t j = 0; j < mid; j++) {
             float a = xi[j];
             float g = xi[mid + j];
             oi[j] = gelu_fast(a) * g;
         }
     }
+}
+
+void lla_swiglu(const float *x, int64_t n, int64_t mid, float *out) {
+    struct swiglu_job j = {x, n, mid, out};
+    lla_run(swiglu_rows, &j, LLA_ROW_TASKS(n, 4));
 }
 
 /* ---------------- rope ---------------- */
@@ -314,6 +497,82 @@ void lla_masked_softmax(const float *S, const uint8_t *allowed, int64_t lda,
         float inv = 1.0f / z;
         for (int64_t j2 = 0; j2 < cols; j2++) oi[j2] *= inv;
     }
+}
+
+/* ---------------- attention ---------------- */
+
+/* cblas_sgemm's shape, reached through a function pointer the caller looks
+ * up (jolt.ffi/find-symbol) so this library links against no BLAS: the
+ * same Accelerate / OpenBLAS entry laya.tensors/mmul! calls. The integer
+ * arguments are passed 64-bit wide: a 32-bit-interface BLAS reads the low
+ * half of the register, an ILP64 one the whole, as the Clojure binding
+ * has always done. */
+typedef void (*sgemm_fn)(int order, int transA, int transB, int64_t m, int64_t n, int64_t k,
+                         float alpha, const float *A, int64_t lda, const float *B, int64_t ldb,
+                         float beta, float *C, int64_t ldc);
+
+enum { CBLAS_ROW_MAJOR = 101, CBLAS_NO_TRANS = 111, CBLAS_TRANS = 112 };
+
+struct attention_job {
+    sgemm_fn sgemm;
+    const float *qh, *kh, *vh;
+    const uint8_t *allowed;
+    int64_t H, L, hd, window, block, reach, nblocks;
+    float scale;
+    float *ctx;
+};
+
+/* one (head, query block): scores = scale * Q K^T over the keys within
+ * reach of the block, masked softmax, P V into the head's columns of the
+ * token-major context (ldc = H*hd). The two products are the two gemms
+ * torch's math-path SDPA runs; the softmax is lla_masked_softmax on the
+ * thread's scratch block. A query row with no allowed key (padding under
+ * a window) stays zero. */
+static void attention_task(void *ctx, int64_t task, int thread) {
+    struct attention_job *j = ctx;
+    int64_t h = task / j->nblocks, b = task % j->nblocks;
+    int64_t L = j->L, hd = j->hd, d = j->H * hd;
+    int64_t i0 = b * j->block, i1 = i0 + j->block < L ? i0 + j->block : L;
+    int64_t k0 = i0 - j->reach > 0 ? i0 - j->reach : 0;
+    int64_t k1 = i1 + j->reach < L ? i1 + j->reach : L;
+    int64_t rows = i1 - i0, cols = k1 - k0;
+    float *S = lla_scratch(thread, (size_t)(2 * rows * cols) * sizeof(float));
+    float *P = S + rows * cols;
+    const float *q = j->qh + h * L * hd + i0 * hd;
+    const float *k = j->kh + h * L * hd + k0 * hd;
+    const float *v = j->vh + h * L * hd + k0 * hd;
+    j->sgemm(CBLAS_ROW_MAJOR, CBLAS_NO_TRANS, CBLAS_TRANS, rows, cols, hd,
+             j->scale, q, hd, k, hd, 0.0f, S, cols);
+    lla_masked_softmax(S, j->allowed + i0 * L + k0, L, rows, cols, P);
+    j->sgemm(CBLAS_ROW_MAJOR, CBLAS_NO_TRANS, CBLAS_NO_TRANS, rows, hd, cols,
+             1.0f, P, cols, v, hd, 0.0f, j->ctx + i0 * d + h * hd, d);
+}
+
+/* softmax(scale * Q K^T over the allowed keys) V for every head, into the
+ * token-major ctx [L x H*hd]. q/k/v head-major [H*L x hd] (lla_split_qkv's
+ * layout), allowed [L x L] bytes. With window >= 0 (a sliding layer) the
+ * queries go in blocks of 2*window rows and each block only scores the
+ * keys within window of it, so an L=1024 layer touches 256 keys per query
+ * instead of 1024; the mask is still applied inside the block, so the band
+ * is only a saving, never the semantics. The full path takes blocks of
+ * `qblock` rows (all keys) so it too splits into heads x blocks tasks for
+ * the pool; qblock <= 0 means one block. */
+void lla_attention(void *sgemm, const float *qh, const float *kh, const float *vh,
+                   const uint8_t *allowed, int64_t H, int64_t L, int64_t hd, float scale,
+                   int64_t window, int64_t qblock, float *ctx) {
+    struct attention_job j;
+    j.sgemm = (sgemm_fn)sgemm;
+    j.qh = qh; j.kh = kh; j.vh = vh; j.allowed = allowed;
+    j.H = H; j.L = L; j.hd = hd; j.window = window; j.scale = scale; j.ctx = ctx;
+    if (window >= 0) {
+        j.block = window > 0 ? 2 * window : 1;
+        j.reach = window;
+    } else {
+        j.block = qblock > 0 && qblock < L ? qblock : L;
+        j.reach = L;
+    }
+    j.nblocks = (L + j.block - 1) / j.block;
+    lla_run(attention_task, &j, H * j.nblocks);
 }
 
 /* ---------------- misc ---------------- */

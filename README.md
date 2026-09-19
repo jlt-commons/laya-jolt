@@ -432,7 +432,10 @@ Both platforms are supported; `deps.edn` carries darwin and linux entries and
 the build task branches on OS.
 
 - **kernels** — `native/liblaya_kernels.dylib` (mac) / `.so` (linux), built by
-  `jolt kernels`.
+  `jolt kernels`: the elementwise and reduction kernels and attention, with
+  a pthread pool of their own (`LAYA_THREADS`). Attention calls
+  `cblas_sgemm` through a pointer the Clojure side hands it, so the library
+  links against no BLAS.
 - **ICU** — `libicucore.dylib` on mac (unguarded symbols in the system dylib),
   `libicuuc.so.<ver>` on linux. The tokenizers call `unorm2` (NFC) and the
   `u_charType` / `u_isUWhiteSpace` classifiers; language detection and the
@@ -470,18 +473,22 @@ per ModernBERT-large checkpoint, 1.3 GB for mmBERT-base; the server keeps
 as one batch of up to 8 rows (padded to the longest, masked), sharing every
 matmul; the intermediates are one workspace per call, ~260 MB at 8 x 512.
 
-Speed, `english` on an M-series laptop, Accelerate, single call: one
-question is ~95 ms at 55 tokens and ~530 ms at 512, linear in between; the
-bundled `demo` (4 questions, ~90 tokens each) takes ~360 ms and `email` on
-a 3,000-character body (5 questions at the 512 cap) ~2.4 s. The matmuls
-are Accelerate's (multi-core); attention, the softmax, LayerNorm and the
-GELU are single-threaded C kernels, vectorized, and at 512 tokens they are
-about half of a row's time.
+Speed, `english` on a 10-core M-series laptop, Accelerate, single call:
+one question is ~95 ms at 55 tokens and ~350 ms at 512, linear in between;
+the bundled `demo` (4 questions, ~90 tokens each) takes ~290 ms and
+`email` on a 3,000-character body (5 questions at the 512 cap) ~1.5 s. The
+matmuls are Accelerate's (multi-core); attention (heads x query blocks),
+the swiglu GELU and LayerNorm (rows) run on the kernel library's own
+thread pool, `LAYA_THREADS` wide (default: the online processors;
+`laya.tensors/set-threads!` at runtime). The thread count changes only the
+schedule, never a result: every task runs the same arithmetic, and the
+suite checks the bytes are identical at 1, 2, 3 and 8 threads. On one
+thread the same call takes ~520 ms at 512 tokens and `email` ~2.3 s.
 
 Two known sources of last-digit drift, both one unit in the fourth decimal
 of a probability sitting on a rounding boundary: Python computes the
 calibrated softmax in float32 (numpy) and the port in doubles; and sgemm
 summation order differs between BLAS libraries, and between the CPU
 models OpenBLAS picks its kernels for (the same weights gave 0.3142 on one
-Linux CI machine and 0.3143 on another). The suite asserts byte identity
-under Accelerate and the one-ulp bound everywhere.
+Linux CI machine and 0.3143 on another). The suite asserts the one-unit
+bound everywhere.
