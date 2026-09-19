@@ -385,3 +385,48 @@
       (let [h0 (laya.model/head-layer! w cfg 0 plain full)
             h0-ws (laya.model/head-layer! w cfg 0 plain full ws)]
         (is (same? h0 h0-ws))))))
+
+;; --- elementwise kernels vs libm / double references ------------------------
+
+(deftest swiglu-matches-libm-gelu
+  ;; swiglu's erf is a vectorizable polynomial (NR erfcc over exp_fast);
+  ;; lla_gelu keeps libm erff and is the oracle: swiglu(x) == gelu(a) * g
+  ;; to a few f32 ulps. The floor of 1e-6 is for the deep negative tail
+  ;; (a < -4, outputs ~1e-6), where the oracle's own 1 + erff(u) in f32
+  ;; is the inaccurate side.
+  (let [n 40 mid 300
+        xs (mapv #(* 16.0 %) (lcg-floats 31 (* n 2 mid)))      ; a, g in [-8, 8)
+        x (t/reshape (t/from-floats xs) [n (* 2 mid)])
+        got (t/to-floats (t/swiglu x mid))
+        a (t/from-floats (for [i (range n) j (range mid)] (nth xs (+ (* i 2 mid) j))))
+        g (for [i (range n) j (range mid)] (double (nth xs (+ (* i 2 mid) mid j))))
+        want (map * (t/to-floats (t/gelu! a)) g)
+        worst (reduce max (map (fn [got want] (/ (Math/abs (- (double got) want))
+                                                  (+ 1e-6 (* 5e-7 (Math/abs want)))))
+                               got want))]
+    (is (= (* n mid) (count got)))
+    (is (< worst 1.0) (str "worst error in units of (1e-6 + 5e-7 |ref|): " worst))))
+
+(deftest layernorm-matches-double-reference
+  (let [n 20 d 1024
+        xs (mapv #(* 40.0 %) (lcg-floats 41 (* n d)))          ; stream-like magnitudes
+        w (mapv #(+ 1.0 %) (lcg-floats 42 d))
+        b (lcg-floats 43 d)
+        eps 1e-5
+        got-b (t/to-floats (t/layernorm (t/reshape (t/from-floats xs) [n d]) (t/from-floats w) (t/from-floats b) eps))
+        got (t/to-floats (t/layernorm (t/reshape (t/from-floats xs) [n d]) (t/from-floats w) eps))
+        want (fn [bias?]
+               (vec (apply concat
+                           (for [i (range n)]
+                             (let [row (subvec xs (* i d) (* (inc i) d))
+                                   ;; the f32 inputs the kernel sees, in double
+                                   row (mapv #(double (float %)) row)
+                                   mean (/ (reduce + row) d)
+                                   var (/ (reduce + (map #(* (- % mean) (- % mean)) row)) d)
+                                   inv (/ 1.0 (Math/sqrt (+ var eps)))]
+                               (map-indexed (fn [j v] (+ (* (- v mean) inv (double (float (nth w j))))
+                                                         (if bias? (double (float (nth b j))) 0.0)))
+                                            row))))))
+        err (fn [got want] (reduce max (map #(Math/abs (- (double %1) %2)) got want)))]
+    (is (< (err got (want false)) 1e-5) "weight-only layernorm")
+    (is (< (err got-b (want true)) 1e-5) "layernorm with bias")))

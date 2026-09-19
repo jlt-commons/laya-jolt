@@ -28,30 +28,99 @@ void lla_gather_rows(const float *emb, const int64_t *ids, int64_t n, int64_t d,
 
 /* LayerNorm over the last dim. weight-only when bias==NULL (ModernBERT's
  * norm_bias=false); with bias for the torch head (norm1/norm2 have bias).
- * torch computes mean/var in f32 with eps inside the sqrt. */
+ * torch computes mean/var in f32 with eps inside the sqrt; the sums here
+ * are double, in four lanes so the loops vectorize (an f32 or f64
+ * reduction is not reassociated at -O2 unless it is spelled out), and the
+ * normalize pass is f32 like torch's. */
 void lla_layernorm(const float *x, const float *w, const float *b, int64_t n,
                    int64_t d, float eps, float *out) {
     for (int64_t i = 0; i < n; i++) {
         const float *xi = x + i * d;
         float *oi = out + i * d;
-        double sum = 0.0;
-        for (int64_t j = 0; j < d; j++) sum += xi[j];
-        double mean = sum / d;
-        double var = 0.0;
-        for (int64_t j = 0; j < d; j++) {
+        double s[4] = {0, 0, 0, 0};
+        int64_t j = 0;
+        for (; j + 4 <= d; j += 4)
+            for (int k = 0; k < 4; k++) s[k] += xi[j + k];
+        for (; j < d; j++) s[0] += xi[j];
+        double mean = ((s[0] + s[1]) + (s[2] + s[3])) / d;
+        double v[4] = {0, 0, 0, 0};
+        j = 0;
+        for (; j + 4 <= d; j += 4)
+            for (int k = 0; k < 4; k++) {
+                double t = xi[j + k] - mean;
+                v[k] += t * t;
+            }
+        for (; j < d; j++) {
             double t = xi[j] - mean;
-            var += t * t;
+            v[0] += t * t;
         }
-        var /= d;
-        double inv = 1.0 / sqrt(var + eps);
+        double var = ((v[0] + v[1]) + (v[2] + v[3])) / d;
+        float meanf = (float)mean;
+        float inv = (float)(1.0 / sqrt(var + eps));
         if (b) {
-            for (int64_t j = 0; j < d; j++)
-                oi[j] = (float)((xi[j] - mean) * inv * w[j] + b[j]);
+            for (int64_t j2 = 0; j2 < d; j2++)
+                oi[j2] = (xi[j2] - meanf) * inv * w[j2] + b[j2];
         } else {
-            for (int64_t j = 0; j < d; j++)
-                oi[j] = (float)((xi[j] - mean) * inv * w[j]);
+            for (int64_t j2 = 0; j2 < d; j2++)
+                oi[j2] = (xi[j2] - meanf) * inv * w[j2];
         }
     }
+}
+
+/* ---------------- fast math ---------------- */
+
+/* e^x written so the loop vectorizes: no libm call, no branch, rounding by
+ * the 1.5*2^23 trick rather than rintf (which is a libcall on baseline
+ * x86-64). Cody-Waite reduction x = n ln2 + r with |r| <= ln2/2, Cephes'
+ * degree-6 polynomial for e^r, and 2^n through the exponent field: about
+ * 1 ulp against libm expf, checked by tensors_test through the softmax.
+ * The argument is clamped to [-87.3, 88]: below, the f32 result is
+ * denormal or zero either way; above, only a masked softmax key gets
+ * there (its finite result is multiplied by 0). */
+static inline float exp_fast(float x) {
+    x = x < -87.3f ? -87.3f : x;
+    x = x > 88.0f ? 88.0f : x;
+    float n = x * 1.44269504088896341f + 12582912.0f;
+    n -= 12582912.0f;                              /* nearest integer, as a float */
+    float r = x - n * 0.693145751953125f;          /* ln2 split in two: hi is exact in f32 */
+    r -= n * 1.428606765330187e-06f;
+    float p = 1.9875691500E-4f;
+    p = p * r + 1.3981999507E-3f;
+    p = p * r + 8.3334519073E-3f;
+    p = p * r + 4.1665795894E-2f;
+    p = p * r + 1.6666665459E-1f;
+    p = p * r + 5.0000001201E-1f;
+    p = p * r * r + r + 1.0f;
+    union { int32_t i; float f; } two_n;
+    two_n.i = ((int32_t)n + 127) << 23;
+    return p * two_n.f;
+}
+
+/* erf-GELU, 0.5 x (1 + erf(x / sqrt 2)), with the erf branch-free and
+ * vectorizable. The complement is Numerical Recipes' Chebyshev erfcc,
+ * erfc(z) = t exp(-z^2 + P(t)), t = 1/(1 + z/2), relative error < 1.2e-7
+ * for every z >= 0; a negative x takes 1 + erf(u) = erfc(|u|) straight
+ * from it, so the tail of the GELU keeps its relative accuracy instead of
+ * losing it to 1 - (1 - small). A few f32 ulps against libm erff, pinned
+ * by tensors_test. lla_gelu keeps libm's erff: it only runs on the
+ * scorer's handful of marker rows, and it is that test's oracle. */
+static inline float gelu_fast(float x) {
+    float u = x * 0.70710678118654752440f;
+    float z = u < 0.0f ? -u : u;
+    float t = 1.0f / (1.0f + 0.5f * z);
+    float p = 0.17087277f;
+    p = p * t - 0.82215223f;
+    p = p * t + 1.48851587f;
+    p = p * t - 1.13520398f;
+    p = p * t + 0.27886807f;
+    p = p * t - 0.18628806f;
+    p = p * t + 0.09678418f;
+    p = p * t + 0.37409196f;
+    p = p * t + 1.00002368f;
+    p = p * t - 1.26551223f;
+    float erfc = t * exp_fast(-z * z + p);
+    float one_plus_erf = u < 0.0f ? erfc : 2.0f - erfc;
+    return 0.5f * x * one_plus_erf;
 }
 
 /* ---------------- activations ---------------- */
@@ -77,7 +146,8 @@ void lla_silu(const float *x, int64_t n, float *out) {
 }
 
 /* SwiGLU with erf-gelu on the gate input, torch ModernBertMLP:
- * out = act(Wi(x)[0:mid]) * Wi(x)[mid:2*mid]. in = [n x 2*mid] -> out [n x mid]. */
+ * out = act(Wi(x)[0:mid]) * Wi(x)[mid:2*mid]. in = [n x 2*mid] -> out [n x mid].
+ * This is [L x 2624] erfs per layer, so it uses gelu_fast (vectorized). */
 void lla_swiglu(const float *x, int64_t n, int64_t mid, float *out) {
     for (int64_t i = 0; i < n; i++) {
         const float *xi = x + i * 2 * mid;
@@ -85,8 +155,7 @@ void lla_swiglu(const float *x, int64_t n, int64_t mid, float *out) {
         for (int64_t j = 0; j < mid; j++) {
             float a = xi[j];
             float g = xi[mid + j];
-            float act = 0.5f * a * (1.0f + erff(a * 0.70710678118654752440f));
-            oi[j] = act * g;
+            oi[j] = gelu_fast(a) * g;
         }
     }
 }
@@ -191,33 +260,6 @@ void lla_allowed_mask(const uint8_t *att, int64_t b, int64_t L, int64_t window,
 
 /* ---------------- attention softmax (the two gemms are cblas, see laya.tensors/attention) ---------------- */
 
-/* e^x for x <= 0 (a max-subtracted score), written so the loop vectorizes:
- * no libm call, no branch, rounding by the 1.5*2^23 trick rather than rintf
- * (which is a libcall on baseline x86-64). Cody-Waite reduction
- * x = n ln2 + r with |r| <= ln2/2, Cephes' degree-6 polynomial for e^r, and
- * 2^n through the exponent field: about 1 ulp against libm expf, checked
- * by tensors_test. Below -87.3 the f32 result is denormal or zero either
- * way, so the argument is clamped there; above 0 it is clamped to 0, which
- * only masked keys reach (they are multiplied by 0 afterwards). */
-static inline float exp_neg(float x) {
-    x = x < -87.3f ? -87.3f : x;
-    x = x > 0.0f ? 0.0f : x;
-    float n = x * 1.44269504088896341f + 12582912.0f;
-    n -= 12582912.0f;                              /* nearest integer, as a float */
-    float r = x - n * 0.693145751953125f;          /* ln2 split in two: hi is exact in f32 */
-    r -= n * 1.428606765330187e-06f;
-    float p = 1.9875691500E-4f;
-    p = p * r + 1.3981999507E-3f;
-    p = p * r + 8.3334519073E-3f;
-    p = p * r + 4.1665795894E-2f;
-    p = p * r + 1.6666665459E-1f;
-    p = p * r + 5.0000001201E-1f;
-    p = p * r * r + r + 1.0f;
-    union { int32_t i; float f; } two_n;
-    two_n.i = ((int32_t)n + 127) << 23;
-    return p * two_n.f;
-}
-
 #ifdef __clang__
 #define LLA_INTERLEAVE4 _Pragma("clang loop interleave_count(4)")
 #else
@@ -261,7 +303,7 @@ void lla_masked_softmax(const float *S, const uint8_t *allowed, int64_t lda,
         }
         LLA_INTERLEAVE4
         for (int64_t j2 = 0; j2 < cols; j2++)
-            oi[j2] = (float)ai[j2] * exp_neg(si[j2] - m);
+            oi[j2] = (float)ai[j2] * exp_fast(si[j2] - m);
         float lane[8] = {0, 0, 0, 0, 0, 0, 0, 0};
         j = 0;
         for (; j + 8 <= cols; j += 8)
