@@ -12,3 +12,4 @@ target/
 .lsp/
 *.a
 laya-server
+*.build/
