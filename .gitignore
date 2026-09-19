@@ -11,6 +11,8 @@ target/
 .clj-kondo/
 .lsp/
 *.a
+native/llama.cpp/
+native/frameworks/
 lev-server
 *.build/
 

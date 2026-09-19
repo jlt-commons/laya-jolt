@@ -22,13 +22,48 @@
                 :darwin ["native/liblev_kernels.dylib"]
                 :linux  ["native/liblev_kernels.so"]
                 :static {:archive "native/liblev_kernels.a"}}
+               ;; llama.cpp behind native/lev_llm.c, built by `jolt llama`
+               ;; (optional at runtime: without it only the thinker is missing)
+               {:name "lev_llm"
+                :optional true
+                :darwin ["native/liblev_llm.dylib"]
+                :linux  ["native/liblev_llm.so"]
+                :static {:archive "native/liblev_llm.a"}}
+               ;; what the static llm archive needs at link time: the C++
+               ;; runtime and, on mac, the frameworks ggml-metal uses. ld64
+               ;; links a framework by its stub when it finds lib<Name>.tbd
+               ;; in an -L dir, which native/build_llm.sh symlinks from the
+               ;; SDK; at runtime these are dlopened like blas below.
+               {:name "cxx"
+                :optional true
+                :darwin ["libc++.1.dylib"]
+                :linux ["libstdc++.so.6"]
+                :static {:darwin {:lib "c++"} :linux {:lib "stdc++"}}}
+               {:name "metal"
+                :optional true
+                :darwin ["/System/Library/Frameworks/Metal.framework/Metal"]
+                :linux []
+                :static {:darwin {:lib "Metal" :libdir "native/frameworks"}}}
+               {:name "foundation"
+                :optional true
+                :darwin ["/System/Library/Frameworks/Foundation.framework/Foundation"]
+                :linux []
+                :static {:darwin {:lib "Foundation" :libdir "native/frameworks"}}}
+               {:name "metalkit"
+                :optional true
+                :darwin ["/System/Library/Frameworks/MetalKit.framework/MetalKit"]
+                :linux []
+                :static {:darwin {:lib "MetalKit" :libdir "native/frameworks"}}}
                {:name "icu"
                 :darwin ["libicucore.dylib"]
                 :linux  ["libicuuc.so.76" "libicuuc.so.75" "libicuuc.so.74"
                          "libicuuc.so.72" "libicuuc.so.71" "libicuuc.so"]}
+               ;; on mac the static llm archive (ggml-cpu) also needs Accelerate
+               ;; at link time, through its stub like the frameworks above
                {:name "blas"
                 :darwin ["/System/Library/Frameworks/Accelerate.framework/Accelerate"]
-                :linux  ["libopenblas.so.0" "libopenblas.so"]}]
+                :linux  ["libopenblas.so.0" "libopenblas.so"]
+                :static {:darwin {:lib "Accelerate" :libdir "native/frameworks"}}}]
 
  :tasks
  {:requires ([babashka.fs :as fs])
@@ -51,9 +86,29 @@
                (fs/delete-if-exists "native/lev_kernels.o")
                (println "built:" kern-lib kern-archive)))}
 
+  llama
+  {:doc "clone llama.cpp at the pinned tag into native/llama.cpp, build it static, wrap it in native/liblev_llm.* (the thinker's native; LLAMA_CPP_SRC=path clones from a local checkout)"
+   :task (let [tag "b10435"
+               src (or (System/getenv "LLAMA_CPP_SRC") "https://github.com/ggml-org/llama.cpp")
+               dir "native/llama.cpp"
+               lib (str "native/liblev_llm." (if mac? "dylib" "so"))]
+           (when-not (fs/exists? (str dir "/CMakeLists.txt"))
+             (shell "git" "clone" "--quiet" "--depth" "1" "--branch" tag src dir))
+           (when-not (fs/exists? (str dir "/build/src/libllama.a"))
+             (apply shell "cmake" "-S" dir "-B" (str dir "/build") "-DCMAKE_BUILD_TYPE=Release"
+                    "-DBUILD_SHARED_LIBS=OFF" "-DGGML_OPENMP=OFF" "-DGGML_NATIVE=OFF" "-DGGML_CPU_ALL_VARIANTS=OFF"
+                    "-DLLAMA_BUILD_TESTS=OFF" "-DLLAMA_BUILD_EXAMPLES=OFF" "-DLLAMA_BUILD_TOOLS=OFF"
+                    "-DLLAMA_BUILD_SERVER=OFF" "-DLLAMA_CURL=OFF"
+                    (if mac? ["-DGGML_METAL=ON" "-DGGML_METAL_EMBED_LIBRARY=ON" "-DGGML_BLAS=OFF"] ["-DGGML_METAL=OFF"]))
+             (shell "cmake" "--build" (str dir "/build") "--target" "llama" "-j"))
+           (if (and (fs/exists? lib) (fs/exists? "native/liblev_llm.a")
+                    (empty? (fs/modified-since lib ["native/lev_llm.c" "native/build_llm.sh"])))
+             (println "llm: up to date -" lib "native/liblev_llm.a")
+             (shell "sh" "native/build_llm.sh")))}
+
   binary
-  {:doc "build the standalone HTTP server ./lev-server and self-test it against golden/"
-   :depends [kernels]
+  {:doc "build the standalone HTTP server ./lev-server (kernels and llama.cpp linked in) and self-test it against golden/"
+   :depends [kernels llama]
    :task (do (shell "jolt" "build" "-m" "lev.server" "-o" "lev-server")
              ;; the suite runs interpreted; the AOT build must prove itself
              (shell "./lev-server" "--self-test" "--data" "data" "--golden" "golden")

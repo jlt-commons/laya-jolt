@@ -8,6 +8,7 @@
     lev.sequence-test
     lev.json-test
     lev.constraints-test
+    lev.llm-test
     workflows.email-test
     workflows.presets-test
     lev.lang-test

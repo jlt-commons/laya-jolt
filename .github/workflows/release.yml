@@ -56,6 +56,9 @@ jobs:
       - name: Test multilingual
         run: LEV_CHECKPOINTS=multilingual jolt -M:test lev.checkpoints-test
 
+      # jolt binary first runs the llama task: llama.cpp is cloned at its
+      # pinned tag and built static (cmake; Metal on mac, CPU elsewhere), so
+      # the binary carries the thinker
       - name: Build and self-test the binary
         run: jolt binary
 
