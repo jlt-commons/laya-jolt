@@ -81,9 +81,9 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             --title "laya-jolt ${GITHUB_REF_NAME}" \
             --verify-tag \
-            --notes "Standalone \`laya-server\` for macOS (arm64) and Linux (x86_64), self-tested against \`golden/\`.
+            --notes "Standalone \`laya-server\` for macOS (arm64) and Linux (x86_64), self-tested against \`golden/\`, with the bundled workflows.
 
-          The binary does not carry the weights. Convert the \`convaiinnovations/laya\` checkpoint once with \`jolt prepare\` (revision \`7c76b62\`, the one the golden traces were dumped from), then run \`./laya-server --data data --port 8080\`. \`./laya-server --self-test --data data --golden golden\` checks the pair.
+          The binary does not carry the weights. Download the \`convaiinnovations/laya\` checkpoints you want (README, Getting the checkpoints) and convert them once with \`jolt prepare\`, then run \`./laya-server --data data --port 8080 --workflows workflows\`. \`./laya-server --self-test --data data --golden golden\` checks the pair. Requests route between the english, multilingual and typed-decisions checkpoints like the Python package's Router; unprepared ones answer 503.
 
           Runtime deps on Linux: ICU and OpenBLAS (\`apt install libicu-dev libopenblas-dev\`, or the runtime packages for your release). macOS uses the system ICU and Accelerate.
           The macOS binary is unsigned; clear the quarantine flag before first run: \`xattr -d com.apple.quarantine ./laya-server\`." \

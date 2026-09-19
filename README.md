@@ -168,11 +168,17 @@ jolt -M:run refund-risk @ticket.json --options '{"teams": {"billing": "money", "
 LAYA_WORKFLOWS=./my-workflows jolt -M:run refund-risk @ticket.json   # only that directory
 ```
 
-Bundled: `demo` (the quickstart; its answer is pinned by `golden/readme.edn`)
-and `email` (the port of `laya`'s `email_state` / `email_questions`: cleans
-quoted history, signatures and disclaimers out of `{"subject" "body" "from"}`
-and asks category, spam, phishing, urgency, needs-reply; option
-`{"categories" {key description}}` swaps the teams).
+Bundled, all byte-identical to the Python package's presets
+(`golden/presets.edn`):
+
+| workflow | input | asks |
+|---|---|---|
+| `demo` | nothing (the quickstart email; pinned by `golden/readme.edn`) | department, urgency, churn risk, phishing |
+| `email` | `{"subject", "body", "from"}`; cleans quoted history, signatures, disclaimers | category (option `{"categories" {key description}}` swaps the teams), spam, phishing, urgency, needs reply |
+| `triage` | `{"message"}` or a string | intent, urgency, frustration, refund requested, churn risk |
+| `guard` | `{"prompt"}` or a string | jailbreak, prompt injection, sensitive data, harm severity, topic |
+| `moderation` | `{"post"}` or a string | toxic, harassment, threat, spam, severity |
+| `llm-router` | `{"request"}` or a string | difficulty, domain, needs tools, is sensitive (routing *your* LLM traffic; `laya.router` picks Laya checkpoints) |
 
 ## HTTP API
 
