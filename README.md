@@ -74,14 +74,18 @@ files and says so.
 
 ```
 jolt kernels             # compile native/lev_kernels.c
+jolt llama               # clone + build llama.cpp (pinned tag) into native/liblev_llm.*, the thinker's native
 jolt prepare             # every checkpoint under ../laya -> data/, data/typed-decisions, ...
 jolt -M:test             # parity suites vs golden/
 jolt -M:run demo         # README quickstart through the workflow runner
 jolt -M:serve            # HTTP API on http://127.0.0.1:8080
-jolt binary              # standalone ./lev-server, self-tested against golden/
+jolt binary              # standalone ./lev-server (kernels + llama.cpp linked in), self-tested against golden/
 ```
 
-`jolt kernels` shells out to `cc`. `jolt prepare` needs only the checkpoints
+jolt 0.8.10 or newer (`deps.edn :jolt/min-version`; an older runtime
+refuses the tree, and CI always installs the latest release). `jolt kernels`
+shells out to `cc`; `jolt llama` to `git`, `cmake` and `cc`, and is optional:
+without its library the encoders run and only the thinker is missing. `jolt prepare` needs only the checkpoints
 and the kernel library; it runs in a few seconds per checkpoint. No Python
 is involved anywhere; `golden/` holds the traces dumped from the torch CPU
 oracle (english at the root, `golden/typed-decisions/` and

@@ -1,5 +1,11 @@
 {:paths ["src"]
 
+ ;; the oldest jolt this tree runs on: 0.8.10 fixed the release-build reduce
+ ;; miscompile (see lev.tokenizer/lowest-ranked-pair). CI installs the latest
+ ;; release (JOLT_PIN only during an incident); this floor makes an older
+ ;; runtime refuse the tree instead of building it wrong
+ :jolt/min-version "0.8.10"
+
  ;; data.json reads tokenizer.json / the configs / the safetensors header in
  ;; `jolt prepare`. It needs java.time at load, which jolt-lang/time provides.
  ;; ring-chez-adapter serves lev.server (jolt -M:serve / the built binary);
