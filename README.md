@@ -426,6 +426,16 @@ x86_64, with `golden/` and `workflows/` alongside, built and self-tested by
 push, fetching the three checkpoints from the Hub at the revision `golden/`
 was dumped from (`.github/actions/setup`).
 
+## Accuracy
+
+`bench/` runs a prepared checkpoint on von's authored144 set (144
+adversarial three-way decisions) and records how the alternatives do on
+the same cases: laya `english` 61%, `typed-decisions` 67%, von-1.0 (an NLI
+head on the same ModernBERT-large encoder) 76%, a 2.5B decoder answering
+directly 74%, the same decoder with ~300 tokens of thinking 97% at 3 s a
+case. The gap to a hosted generative decision API is the reasoning budget,
+not the encoder; see [bench/README.md](bench/README.md).
+
 ## Native dependencies
 
 Both platforms are supported; `deps.edn` carries darwin and linux entries and
