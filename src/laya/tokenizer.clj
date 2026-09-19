@@ -27,7 +27,9 @@
                       {:symbol csym})))
     `(def ~name (ffi/foreign-fn ~found ~argtypes ~rettype))))
 
-(deficu unorm2-get-instance* "unorm2_getNFCInstance" [] :pointer)
+;; takes UErrorCode* and reads it before doing anything: passing nothing
+;; "worked" on mac by luck and segfaulted on linux
+(deficu unorm2-get-instance* "unorm2_getNFCInstance" [:pointer] :pointer)
 (deficu unorm2-normalize* "unorm2_normalize"
   [:pointer :pointer :int32 :pointer :int32 :pointer] :int32)
 (deficu u-char-type* "u_charType" [:int32] :int32)
@@ -35,7 +37,15 @@
 ;; U+001C..U+001F separators that the GPT-2 pattern treats as ordinary chars.
 (deficu u-is-uwhitespace* "u_isUWhiteSpace" [:int32] :int8)
 
-(def nfc-instance (delay (unorm2-get-instance*)))
+(def nfc-instance
+  (delay (with-open [a (ffi/confined-arena)]
+           (let [err (ffi/alloc a 4)]
+             (ffi/write err :int32 0 0)
+             (let [p (unorm2-get-instance* err)
+                   code (ffi/read err :int32 0)]
+               (when (pos? code)
+                 (throw (ex-info "unorm2_getNFCInstance failed" {:code code})))
+               p)))))
 
 (def ^:private U_BUFFER_OVERFLOW_ERROR 15)
 
@@ -89,6 +99,8 @@
                               err (ffi/alloc a 4)]
                           (dotimes [i n]
                             (ffi/write src :uint16 (bit-and 0xFFFF (nth units i)) (* 2 i)))
+                          ;; ICU returns early on a pre-set error code
+                          (ffi/write err :int32 0 0)
                           (let [ret (unorm2-normalize* @nfc-instance src (int n)
                                                        dst (int cap) err)
                                 code (ffi/read err :int32 0)]

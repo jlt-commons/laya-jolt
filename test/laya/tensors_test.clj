@@ -94,6 +94,14 @@
 
 ;; --- encoder: layer-by-layer vs golden ---------------------------------------
 
+;; Absolute bounds on the residual stream. Early layers sit at f32 noise; by
+;; layer 27 the outlier dimensions are in the hundreds and sgemm summation
+;; order shows: Accelerate lands at ~0.03, OpenBLAS (linux CI) at 0.105. The
+;; head layers see the same: ~5e-4 on Accelerate, 1.7e-3 on OpenBLAS. Both
+;; still give byte-identical answers at 4 decimals (agent_test, server_test).
+(def ^:private last-layer-tol 0.25)
+(def ^:private head-layer-tol 5e-3)
+
 (deftest encoder-matches-torch
   (let [layers (slurp-edn (str golden-dir "/layers.edn"))
         manifest (edn/read-string (slurp (str data-dir "/manifest.edn")))
@@ -120,7 +128,7 @@
                                     (laya.model/encoder-layer! w cfg k h att0 full slid)))
                         emb (range (inc i)))
             gold (read-golden-f32 (keyword (str "layer-" i)) layers)]
-        (is (< (mx out gold 0 (* 74 1024)) (if (= i 27) 0.05 1e-4))
+        (is (< (mx out gold 0 (* 74 1024)) (if (= i 27) last-layer-tol 1e-4))
             (str "layer " i " max-abs " (mx out gold 0 (* 74 1024))))))
     (testing "padded batch row 1 (64 real tokens): real rows match, pad rows ignored"
       (let [ids1 (t/from-ints (map int (second (layers :ids))))
@@ -136,7 +144,7 @@
                   (let [h2 (laya.model/encoder-layer! w cfg k h att1 full1 slid1)]
                     (when (#{0 1 2 27} k)
                       (let [gold (read-golden-f32 (keyword (str "layer-" k)) layers)]
-                        (is (< (mx h2 gold off n-real) (if (= k 27) 0.05 1e-4))
+                        (is (< (mx h2 gold off n-real) (if (= k 27) last-layer-tol 1e-4))
                             (str "row 1 layer " k " max-abs " (mx h2 gold off n-real)))))
                     h2))
                 emb1 (range 28))))))
@@ -162,9 +170,9 @@
                      (recur (inc i)
                             (max r (Math/abs (- (t/get (t/ptr a) i)
                                                 (t/get (t/ptr g) i)))))))))]
-    (is (< (mx h0 "head-layer-0" [2 74 1024]) 1e-3)
+    (is (< (mx h0 "head-layer-0" [2 74 1024]) head-layer-tol)
         (str "head layer 0 max-abs " (mx h0 "head-layer-0" [2 74 1024])))
-    (is (< (mx h1 "head-layer-1" [2 74 1024]) 1e-3)
+    (is (< (mx h1 "head-layer-1" [2 74 1024]) head-layer-tol)
         (str "head layer 1 max-abs " (mx h1 "head-layer-1" [2 74 1024])))
     (let [markers (t/reshape (gold "markers" [2 4 1024]) [8 1024])
           logits (laya.model/scorer w markers)
@@ -199,7 +207,7 @@
             m1 (t/gather h1 (t/from-ints (take 2 (second (layers :marker-pos)))) 2 1024)
             lg1 (t/to-floats (laya.model/scorer w m1))
             gold-logits (gold "logits" [2 4])]
-        (is (< mx1 1e-3) (str "row 1 head layer 1 max-abs " mx1))
+        (is (< mx1 head-layer-tol) (str "row 1 head layer 1 max-abs " mx1))
         (is (< (Math/abs (- (first lg1) (t/get (t/ptr gold-logits) 4))) 1e-3))
         (is (< (Math/abs (- (second lg1) (t/get (t/ptr gold-logits) 5))) 1e-3))))))
 
