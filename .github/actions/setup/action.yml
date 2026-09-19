@@ -76,15 +76,18 @@ runs:
     # multilingual subfolders. The cache key is the revision, so a bump above
     # refetches once and every OS shares the one entry (the files are the
     # same bytes everywhere).
-    - name: Cache the Laya checkpoint
+    # -v2 is the layout: bump it when the file list below changes, or a hit on
+    # an older entry serves a directory missing the new files (it did, when
+    # tokenizer_config.json and multilingual/ were added)
+    - name: Cache the Laya checkpoints
       id: checkpoint
       uses: actions/cache@v4
       with:
         path: ~/laya
-        key: laya-checkpoint-${{ inputs.laya-revision }}
+        key: laya-checkpoint-${{ inputs.laya-revision }}-v2
 
-    - name: Fetch the Laya checkpoint
-      if: steps.checkpoint.outputs.cache-hit != 'true'
+    # fetches whatever the cache did not have, then checks every model file
+    - name: Fetch the Laya checkpoints
       shell: bash
       env:
         REV: ${{ inputs.laya-revision }}
@@ -98,7 +101,7 @@ runs:
           local sub="$1" dir="$HOME/laya${1:+/$1}"
           mkdir -p "$dir/tokenizer" "$dir/encoder"
           for f in model.safetensors tokenizer/tokenizer.json tokenizer/tokenizer_config.json encoder/config.json rl_agent_config.json; do
-            curl -fsSL --retry 3 -o "$dir/$f" "$base/${sub:+$sub/}$f"
+            [ -s "$dir/$f" ] || curl -fsSL --retry 3 -o "$dir/$f" "$base/${sub:+$sub/}$f"
           done
         }
         fetch ""
