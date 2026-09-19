@@ -129,6 +129,11 @@ struct lev_llm *lev_llm_load(const char *path, int n_ctx, int n_gpu_layers, int 
     cp.n_batch = cp.n_ctx > 0 && cp.n_ctx < 2048 ? cp.n_ctx : 2048;
     cp.n_ubatch = 512;
     cp.n_seq_max = (uint32_t)(n_seq_max < 2 ? 2 : n_seq_max);
+    /* one KV buffer for every sequence: the option sequences are copies of
+     * the prompt sequence, so they share its cells; split per sequence
+     * (the default past n_seq_max 1) each would get n_ctx / n_seq_max
+     * tokens and a 300-token thought would not fit */
+    cp.kv_unified = true;
     if (n_threads > 0) {
         cp.n_threads = n_threads;
         cp.n_threads_batch = n_threads;

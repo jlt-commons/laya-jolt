@@ -17,8 +17,17 @@
       (is (contains? @bundled name))
       (is (= (get @golden golden-key) (seq/json-str (wf/questions (get @bundled name))))))))
 
+(deftest security-preset-from-von
+  ;; not a laya preset: von's security_preset (github.com/wfzyx/von), with
+  ;; constraints laya's presets have no equivalent of
+  (let [w (get @bundled "security")]
+    (is (= ["event_type" "is_threat" "severity"] (keys (wf/questions w))))
+    (is (= 5 (count (get-in (wf/questions w) ["event_type" "criteria"]))))
+    (is (= 4 (count (get-in (wf/questions w) ["severity" "criteria"]))))
+    (is (= 2 (count (wf/constraints w))))))
+
 (deftest presets-have-descriptions-and-state-keys
-  (doseq [[name key] {"triage" "message" "guard" "prompt" "moderation" "post" "llm-router" "request"}]
+  (doseq [[name key] {"triage" "message" "guard" "prompt" "moderation" "post" "llm-router" "request" "security" "event"}]
     (testing name
       (let [w (get @bundled name)]
         (is (string? (:doc w)))

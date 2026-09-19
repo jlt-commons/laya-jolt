@@ -110,7 +110,7 @@
     (testing "GET /v1/workflows: name, description, question ids, whether options are taken"
       (let [[st b] (call h (req :get "/v1/workflows"))]
         (is (= 200 st))
-        (is (= ["demo" "email" "guard" "llm-router" "moderation" "triage"] (keys (get b "workflows"))))
+        (is (= ["demo" "email" "guard" "llm-router" "moderation" "security" "triage"] (keys (get b "workflows"))))
         (is (= ["category" "is_spam" "is_phishing" "urgency" "needs_reply"] (get-in b ["workflows" "email" "questions"])))
         (is (true? (get-in b ["workflows" "email" "options"])))
         (is (false? (get-in b ["workflows" "demo" "options"])))
@@ -219,7 +219,7 @@
     (let [[st b] (call h (req :get "/health"))]
       (is (= 200 st))
       (is (= {"status" "ok" "model" "laya-rl-agent" "loaded" ["english"] "thinkers" []
-              "workflows" ["demo" "email" "guard" "llm-router" "moderation" "triage"]} b)))))
+              "workflows" ["demo" "email" "guard" "llm-router" "moderation" "security" "triage"]} b)))))
 
 (deftest wire-order-is-preserved
   (testing "14 options and 9 questions keep their JSON order end to end"
@@ -371,3 +371,67 @@
       (let [[st b] (post "/v1/systemone" (assoc base "model" "gpt"))]
         (is (= 422 st))
         (is (str/includes? (get-in b ["detail" 0 "msg"]) "minicpm5"))))))
+
+(deftest escalation-and-patterns-on-the-wire
+  (let [fake (fn [name cfg]
+               {:kind :thinker :name name
+                :cfg (merge {:thinking true :max-think-tokens 64 :temperature 1.0 :top-p 0.95 :min-p 0.0 :seed 1 :system "sys"} cfg)
+                ;; the thinker is sure of the last option, always
+                :decide (fn [_ options _] {:logp (vec (map-indexed (fn [i _] (if (= i (dec (count options))) 0.0 -6.0)) options))
+                                           :thought "" :tokens 9})
+                :count-tokens (fn [_] 5)})
+        rt (router/preloaded @agent "english" {:thinkers {"slow" {:model "target/no-such.gguf"}} :thinker-loader fake})
+        h (srv/handler rt {:workflows @workflows})
+        base (json/read-str (readme-request))
+        post (fn [path body] (call h (req :post path :body (seq/json-str body))))]
+    (testing "escalate: the unsure answers are re-asked on the thinker"
+      (let [[st b] (post "/v1/systemone" (assoc base "escalate" {"threshold" 0.6 "model" "slow"}))]
+        (is (= 200 st) (pr-str b))
+        (is (= ["model" "answers" "usage" "escalation" "routing"] (keys b)))
+        (is (= "laya-rl-agent" (get b "model")))
+        (is (= "billing" (get-in b ["answers" "department" "choice"])) "0.9+: the encoder's")
+        (is (= 0.0312 (get-in b ["answers" "is_phishing" "noul"])) "0.97 sure: the encoder's")
+        (is (contains? (set (get-in b ["escalation" "escalated"])) "churn_risk") "0.57 sure: escalated")
+        (is (> 0.01 (get-in b ["answers" "churn_risk" "noul"])) "the thinker's: its last option, false")
+        (is (= "slow" (get-in b ["escalation" "model"])))
+        (is (= 0.6 (get-in b ["escalation" "threshold"])))
+        (is (pos? (get-in b ["escalation" "usage" "output_tokens"])))))
+    (testing "with constraints, decided over the merged answers; and on a workflow"
+      (let [[st b] (post "/v1/systemone" (assoc base "escalate" {"threshold" 0.6 "model" "slow"}
+                                                "constraints" [["implies" ["department" "billing"] ["churn_risk" false]]]))]
+        (is (= 200 st))
+        (is (= ["model" "answers" "usage" "escalation" "constraints" "routing"] (keys b)))
+        (is (false? (get-in b ["answers" "churn_risk" "decided"]))))
+      (let [[st b] (post "/v1/workflows/demo" {"escalate" {"threshold" 0.6 "model" "slow" "thinking" false}})]
+        (is (= 200 st))
+        (is (= "demo" (get b "workflow")))
+        (is (contains? b "escalation"))))
+    (testing "escalate must name a thinker and a threshold in [0, 1]"
+      (let [loc (fn [b] (get-in b ["detail" 0 "loc"]))]
+        (is (= ["body" "escalate" "model"] (loc (second (post "/v1/systemone" (assoc base "escalate" {"threshold" 0.5}))))))
+        (is (= ["body" "escalate" "model"] (loc (second (post "/v1/systemone" (assoc base "escalate" {"model" "english"}))))))
+        (is (= ["body" "escalate" "threshold"] (loc (second (post "/v1/systemone" (assoc base "escalate" {"model" "slow" "threshold" 2}))))))
+        (is (= ["body" "escalate"] (loc (second (post "/v1/systemone" (assoc base "escalate" "slow"))))))))
+    (testing "the patterns as endpoints"
+      (let [[st b] (post "/v1/patterns/confidence-gate" (assoc base "threshold" 0.6))]
+        (is (= 200 st))
+        (is (= ["automatic" "escalate" "response"] (keys b)))
+        (is (contains? (get b "automatic") "department"))
+        (is (contains? (get b "escalate") "churn_risk")))
+      (let [[st b] (post "/v1/patterns/composite-score" (assoc base "weights" {"urgency" 2.0}))]
+        (is (= 200 st))
+        (is (= ["score" "breakdown" "response"] (keys b)))
+        (is (= ["urgency" "churn_risk" "is_phishing"] (keys (get b "breakdown"))))
+        (is (<= 0.0 (get b "score") 1.0)))
+      (let [[st b] (post "/v1/patterns/two-stage-choice"
+                         {"state" "Postgres replica lag exceeded the limit on the primary."
+                          "taxonomy" (seq/ordered-map [["cloud" (seq/ordered-map [["aws" "Amazon Web Services"] ["gcp" "Google Cloud"]])]
+                                                       ["database" (seq/ordered-map [["postgres" "PostgreSQL"] ["redis" "Redis"]])]])})]
+        (is (= 200 st) (pr-str b))
+        (is (= ["category" "category_confidence" "choice" "choice_confidence" "combined_confidence"] (keys b)))
+        (is (contains? #{"cloud" "database"} (get b "category"))))
+      (testing "their validation"
+        (is (= 422 (first (post "/v1/patterns/two-stage-choice" {"state" "s"}))))
+        (is (= 422 (first (post "/v1/patterns/composite-score" (assoc base "weights" [1 2])))))
+        (is (= 422 (first (post "/v1/patterns/confidence-gate" (assoc base "threshold" "high")))))
+        (is (= 404 (first (post "/v1/patterns/nope" base))))))))

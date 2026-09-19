@@ -178,6 +178,28 @@
   (let [q (key-str qid)]
     (nth (get-in schema [q :labels]) (get-in solution [:assignment q]))))
 
+(defn answer-probs
+  "The probabilities back out of a typed answer, in answer order ([false
+  true] for a noul), for deciding constraints over answers that came from
+  different models (lev.patterns/escalate)."
+  [answer]
+  (case (get answer "type")
+    "choice" (vec (vals (get answer "probabilities")))
+    "score" (mapv #(get (get answer "probabilities") (str %)) (range (count (get answer "legend"))))
+    (let [p (double (get answer "noul"))] [(- 1.0 p) p])))
+
+(defn with-decided
+  "The answer with `decided` right after its own field (choice / score /
+  noul), replacing one already there."
+  [answer decided]
+  (let [own (get answer "type")]
+    (seq/ordered-map
+     (mapcat (fn [[k v]]
+               (cond (= k "decided") []
+                     (= k own) [[k v] ["decided" decided]]
+                     :else [[k v]]))
+             answer))))
+
 (defn constraints-report [{:keys [nodes]} sol]
   (seq/ordered-map [["feasible" (:feasible sol)]
                     ["decoder" (:decoder sol)]

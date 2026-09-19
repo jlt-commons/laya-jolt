@@ -10,6 +10,7 @@
     lev.constraints-test
     lev.llm-test
     lev.think-test
+    lev.patterns-test
     workflows.email-test
     workflows.presets-test
     lev.lang-test

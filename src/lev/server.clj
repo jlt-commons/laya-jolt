@@ -10,8 +10,17 @@
                               -> {\"model\" \"laya-rl-agent\", \"answers\" {...},
                                   \"usage\" {...}, \"thinking\"? {...},
                                   \"constraints\"? {...}, \"routing\" {...}}
+                              with \"escalate\" {\"model\" thinker, \"threshold\"?
+                              0.8, \"thinking\"?}: the answers below the
+                              threshold are re-asked on the thinker and the
+                              body carries an \"escalation\" report (lev.patterns)
     POST /v1/route            same body, questions optional -> the routing
                               decision alone, nothing loaded or run
+    POST /v1/patterns/confidence-gate   systemone body + \"threshold\"? -> {\"automatic\" \"escalate\" \"response\"}
+    POST /v1/patterns/composite-score   systemone body + \"weights\"? \"normalize\"? -> {\"score\" \"breakdown\" \"response\"}
+    POST /v1/patterns/two-stage-choice  {\"state\", \"taxonomy\" {category {option description}},
+                                         \"instructions_category\"? \"instructions_option\"?, \"model\"? ...}
+                                        -> {\"category\" .. \"choice\" .. \"combined_confidence\"}
     POST /v1/workflows/:name  {\"input\" ..., \"options\"? {...},
                                \"constraints\"? [...], \"on_infeasible\"?,
                                \"model\"? \"lang\"? \"task\"?}
@@ -58,6 +67,7 @@
             [lev.config :as cfg]
             [lev.json :as json]
             [lev.llm]
+            [lev.patterns :as pat]
             [lev.router :as router]
             [lev.sequence :as seq]
             [lev.tokenizer :as tk]
@@ -163,6 +173,27 @@
    (when (and (contains? body "on_infeasible") (not (contains? infeasible-modes (get body "on_infeasible"))))
      [(detail ["body" "on_infeasible"] "on_infeasible must be min_violations or raise" "value_error")])))
 
+(defn- check-escalate
+  "escalate, when present, is an object naming a thinker under model,
+  with an optional threshold in [0, 1] and thinking boolean."
+  [rt body]
+  (when (contains? body "escalate")
+    (let [e (get body "escalate")]
+      (if-not (map? e)
+        [(detail ["body" "escalate"] "escalate must be an object: {\"model\": thinker, \"threshold\": 0.8}" "type_error")]
+        (concat
+         (let [m (get e "model")]
+           (cond
+             (not (string? m)) [(detail ["body" "escalate" "model"] "escalate.model (a thinker's name) is required" "value_error")]
+             (not (try (router/thinker? rt m) (catch Exception _ false)))
+             [(detail ["body" "escalate" "model"] (str "escalate.model must name a thinker: one of "
+                                                       (str/join ", " (router/thinker-names rt))) "value_error")]))
+         (when (and (contains? e "threshold")
+                    (not (and (number? (get e "threshold")) (<= 0 (get e "threshold") 1))))
+           [(detail ["body" "escalate" "threshold"] "escalate.threshold must be a number in [0, 1]" "value_error")])
+         (when (and (contains? e "thinking") (not (boolean? (get e "thinking"))))
+           [(detail ["body" "escalate" "thinking"] "escalate.thinking must be true or false" "type_error")]))))))
+
 (defn- check-state [body]
   (let [state (get body "state")]
     (when-not (or (string? state) (map? state) (sequential? state))
@@ -188,6 +219,7 @@
     (vec (concat (check-state body)
                  (check-routing-fields rt body)
                  (check-constraints body)
+                 (check-escalate rt body)
                  (check-questions (get body "questions"))))))
 
 (defn- routing-opts
@@ -201,17 +233,26 @@
      :constraints (get body "constraints")
      :on-infeasible (get body "on_infeasible")
      :thinking (get body "thinking")
-     :thought (get body "thought")}))
+     :thought (get body "thought")
+     :escalate (get body "escalate")}))
 
 (defn- predict
-  "router/predict under the inference lock, with the errors the decoder
-  throws pointed at the request: a bad constraint at its index among the
+  "router/predict under the inference lock (or lev.patterns/escalate when
+  the body has an escalate object), with the errors the decoder throws
+  pointed at the request: a bad constraint at its index among the
   request's own (`offset` of them belong to the workflow)."
-  [rt lock state questions {:keys [model lang task constraints on-infeasible thinking thought]} offset]
+  [rt lock state questions {:keys [model lang task constraints on-infeasible thinking thought escalate]} offset]
   (try (locking lock
-         (router/predict rt state questions :model model :lang lang :task task
-                         :constraints constraints :on-infeasible on-infeasible
-                         :thinking thinking :thought thought))
+         (if escalate
+           (pat/escalate rt state questions
+                         (cond-> {:model (get escalate "model") :fast-model model :lang lang :task task
+                                  :constraints constraints :on-infeasible on-infeasible
+                                  :thought thought}
+                           (contains? escalate "threshold") (assoc :threshold (get escalate "threshold"))
+                           (contains? escalate "thinking") (assoc :thinking (get escalate "thinking"))))
+           (router/predict rt state questions :model model :lang lang :task task
+                           :constraints constraints :on-infeasible on-infeasible
+                           :thinking thinking :thought thought)))
        (catch Exception e
          (if (= :invalid-constraint (:type (ex-data e)))
            (throw (ex-info (ex-message e) (assoc (ex-data e) :offset offset)))
@@ -261,7 +302,7 @@
       (unprocessable [(detail ["body" "options"] "options must be an object" "type_error")])
 
       :else
-      (let [details (concat (check-routing-fields rt body) (check-constraints body))]
+      (let [details (concat (check-routing-fields rt body) (check-constraints body) (check-escalate rt body))]
         (if (seq details)
           (unprocessable details)
           (let [state (wf/state w (get body "input"))
@@ -278,6 +319,46 @@
                                 :constraints (when (or own theirs) (vec (concat own theirs))))
                     result (predict rt lock state questions opts (count own))]
                 (json-response 200 (assoc result "workflow" name "state" state))))))))))
+
+(defn pattern
+  "POST /v1/patterns/:name: confidence-gate, composite-score and
+  two-stage-choice over a systemone body (state + questions, or state +
+  taxonomy), routed like one."
+  [rt lock name body]
+  (let [opts (fn [& ks] (into {} (keep (fn [[k key]] (when (contains? body k) [key (get body k)]))
+                                        (partition 2 ks))))
+        run (fn [details f]
+              (if (seq details)
+                (unprocessable details)
+                (json-response 200 (locking lock (f)))))
+        routing (fn [] (let [{:keys [model lang task]} (routing-opts body)] {:model model :lang lang :task task}))]
+    (case name
+      "confidence-gate"
+      (run (concat (check-request rt body)
+                   (when (and (contains? body "threshold") (not (number? (get body "threshold"))))
+                     [(detail ["body" "threshold"] "threshold must be a number in [0, 1]" "type_error")]))
+           #(pat/confidence-gate rt (get body "state") (get body "questions")
+                                 (merge (routing) (opts "threshold" :threshold))))
+      "composite-score"
+      (run (concat (check-request rt body)
+                   (when (and (contains? body "weights") (not (map? (get body "weights"))))
+                     [(detail ["body" "weights"] "weights must be an object of question id -> number" "type_error")])
+                   (when (and (contains? body "normalize") (not (boolean? (get body "normalize"))))
+                     [(detail ["body" "normalize"] "normalize must be true or false" "type_error")]))
+           #(pat/composite-score rt (get body "state") (get body "questions")
+                                 (merge (routing) (opts "weights" :weights "normalize" :normalize))))
+      "two-stage-choice"
+      (run (if-not (map? body)
+             [(detail ["body"] "request body must be a JSON object" "type_error")]
+             (concat (check-state body)
+                     (check-routing-fields rt body)
+                     (let [t (get body "taxonomy")]
+                       (when-not (and (map? t) (seq t) (every? (fn [[_ v]] (and (map? v) (seq v))) t))
+                         [(detail ["body" "taxonomy"] "taxonomy is required: {category: {option: description}}, no empty levels" "value_error")]))))
+           #(pat/two-stage-choice rt (get body "state") (get body "taxonomy")
+                                  (merge (routing) (opts "instructions_category" :instructions-category
+                                                         "instructions_option" :instructions-option))))
+      not-found)))
 
 (defn- health [rt workflows]
   (json-response 200 (seq/ordered-map [["status" "ok"] ["model" default-model]
@@ -346,6 +427,10 @@
                :response (guard (fn [req]
                                   (try (run-workflow rt lock workflows (get-in req [:params :name])
                                                      (parse-body req true))
+                                       (catch Exception e (error-response e)))))}
+              {:path "/v1/patterns/:name" :method :post
+               :response (guard (fn [req]
+                                  (try (pattern rt lock (get-in req [:params :name]) (parse-body req false))
                                        (catch Exception e (error-response e)))))}]
         disallowed (for [{:keys [path method]} real
                          m http-methods :when (not= m method)]
