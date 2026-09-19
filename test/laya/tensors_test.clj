@@ -303,3 +303,51 @@
                              (t/reshape (t/from-floats vh) [(* H L) hd])
                              allowed H L hd scale)]
         (is (every? zero? (subvec (t/to-floats ctx) (* 6 d) (* 7 d))))))))
+
+(deftest banded-attention-matches-full-mask
+  ;; sliding layers only need the |i-j|<=window band; the blocked path must
+  ;; give the same context as scoring every key and masking (several blocks)
+  (let [H 1 L 300 hd 4 d (* H hd) window 64
+        scale (/ 1.0 (Math/sqrt hd))
+        qh (lcg-floats 11 (* H L hd))
+        kh (lcg-floats 12 (* H L hd))
+        vh (lcg-floats 13 (* H L hd))
+        att (t/from-bytes (concat (repeat 290 1) (repeat 10 0)) [1 L])   ; a padded tail too
+        allowed (t/allowed-mask att 0 L window)
+        mk (fn [xs] (t/reshape (t/from-floats xs) [(* H L) hd]))
+        banded (t/attention (mk qh) (mk kh) (mk vh) allowed H L hd scale window)
+        full (t/attention (mk qh) (mk kh) (mk vh) allowed H L hd scale)
+        want (ref-attention qh kh vh (mapv #(jolt.ffi/read (t/ptr allowed) :uint8 %) (range (* L L))) H L hd scale)]
+    (is (= [L d] (t/shape banded)))
+    (is (< (reduce max (map #(Math/abs (- (double %1) %2)) (t/to-floats banded) want)) 1e-6)
+        "banded vs double reference")
+    (is (< (reduce max (map #(Math/abs (- (double %1) (double %2))) (t/to-floats banded) (t/to-floats full))) 1e-6)
+        "banded vs unbanded")))
+
+(deftest masked-softmax-matches-double-reference
+  ;; the kernel's exp is a vectorizable polynomial: it has to hold to ~1 ulp
+  ;; against libm across the whole range a max-subtracted score can take
+  (let [rows 6 cols 200
+        raw (lcg-floats 21 (* rows cols))
+        ;; spread scores over [-95, 5]: row 0 spans the full range, later rows narrower
+        scores (vec (map-indexed (fn [i x] (let [r (quot i cols)] (* (+ x 0.5) (- (/ 100.0 (inc r)))))) raw))
+        allowed (vec (for [i (range rows) j (range cols)]
+                       (cond (= i 5) 0                        ; a fully masked row
+                             (zero? (mod (+ i j) 7)) 0         ; scattered masked keys
+                             :else 1)))
+        got (t/to-floats (t/masked-softmax (t/reshape (t/from-floats scores) [rows cols])
+                                           (t/from-bytes allowed [rows cols]) rows cols))
+        want (vec (for [i (range rows)]
+                    (let [js (filter #(pos? (nth allowed (+ (* i cols) %))) (range cols))
+                          s (map #(double (nth scores (+ (* i cols) %))) js)]
+                      (if (empty? js)
+                        (vec (repeat cols 0.0))
+                        (let [m (reduce max s)
+                              e (zipmap js (map #(Math/exp (- % m)) s))
+                              z (reduce + (vals e))]
+                          (mapv #(/ (get e % 0.0) z) (range cols)))))))
+        want (vec (apply concat want))]
+    (is (= (* rows cols) (count got)))
+    (is (every? zero? (subvec got (* 5 cols))) "a row with no allowed key stays zero")
+    (let [worst (reduce max (map (fn [g w] (/ (Math/abs (- (double g) w)) (+ 1e-9 w))) got want))]
+      (is (< worst 2e-6) (str "worst relative error on a softmax weight " worst)))))

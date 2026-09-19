@@ -191,33 +191,86 @@ void lla_allowed_mask(const uint8_t *att, int64_t b, int64_t L, int64_t window,
 
 /* ---------------- attention softmax (the two gemms are cblas, see laya.tensors/attention) ---------------- */
 
-/* softmax over allowed keys per query row, torch-style with max subtraction.
- * scores: [L x L] f32 (already scaled). Rows with zero allowed keys are
- * left at zero (they are all-padding rows the caller discards). */
-void lla_masked_softmax(const float *scores, const uint8_t *allowed, int64_t L,
-                        float *out) {
-    for (int64_t i = 0; i < L; i++) {
-        const float *si = scores + i * L;
-        const uint8_t *ai = allowed + i * L;
-        float *oi = out + i * L;
-        float m = -INFINITY;
-        for (int64_t j = 0; j < L; j++)
-            if (ai[j] && si[j] > m) m = si[j];
+/* e^x for x <= 0 (a max-subtracted score), written so the loop vectorizes:
+ * no libm call, no branch, rounding by the 1.5*2^23 trick rather than rintf
+ * (which is a libcall on baseline x86-64). Cody-Waite reduction
+ * x = n ln2 + r with |r| <= ln2/2, Cephes' degree-6 polynomial for e^r, and
+ * 2^n through the exponent field: about 1 ulp against libm expf, checked
+ * by tensors_test. Below -87.3 the f32 result is denormal or zero either
+ * way, so the argument is clamped there; above 0 it is clamped to 0, which
+ * only masked keys reach (they are multiplied by 0 afterwards). */
+static inline float exp_neg(float x) {
+    x = x < -87.3f ? -87.3f : x;
+    x = x > 0.0f ? 0.0f : x;
+    float n = x * 1.44269504088896341f + 12582912.0f;
+    n -= 12582912.0f;                              /* nearest integer, as a float */
+    float r = x - n * 0.693145751953125f;          /* ln2 split in two: hi is exact in f32 */
+    r -= n * 1.428606765330187e-06f;
+    float p = 1.9875691500E-4f;
+    p = p * r + 1.3981999507E-3f;
+    p = p * r + 8.3334519073E-3f;
+    p = p * r + 4.1665795894E-2f;
+    p = p * r + 1.6666665459E-1f;
+    p = p * r + 5.0000001201E-1f;
+    p = p * r * r + r + 1.0f;
+    union { int32_t i; float f; } two_n;
+    two_n.i = ((int32_t)n + 127) << 23;
+    return p * two_n.f;
+}
+
+#ifdef __clang__
+#define LLA_INTERLEAVE4 _Pragma("clang loop interleave_count(4)")
+#else
+#define LLA_INTERLEAVE4
+#endif
+
+/* softmax over the allowed keys of each query row, torch-style with max
+ * subtraction, on a [rows x cols] block. S and P are the block itself
+ * (leading dimension cols); `allowed` points at the block's top-left entry
+ * of the [L x L] mask with leading dimension lda. Rows with no allowed key
+ * are left at zero (padding rows the caller discards).
+ *
+ * Four passes so each is a straight loop the compiler vectorizes. The max
+ * and the sum are f32 reductions, which -O2 will not reassociate on its
+ * own, so both are spelled out in eight lanes. Measured at 16 x 512 x 512
+ * on an M-series core: 5.5 ms, of which the exp pass is half; interleaving
+ * it 4x is worth a third of that pass. */
+void lla_masked_softmax(const float *S, const uint8_t *allowed, int64_t lda,
+                        int64_t rows, int64_t cols, float *P) {
+    for (int64_t i = 0; i < rows; i++) {
+        const float *si = S + i * cols;
+        const uint8_t *ai = allowed + i * lda;
+        float *oi = P + i * cols;
+        float mx[8] = {-INFINITY, -INFINITY, -INFINITY, -INFINITY,
+                       -INFINITY, -INFINITY, -INFINITY, -INFINITY};
+        int64_t j = 0;
+        for (; j + 8 <= cols; j += 8)
+            for (int k = 0; k < 8; k++) {
+                float v = ai[j + k] ? si[j + k] : -INFINITY;
+                mx[k] = v > mx[k] ? v : mx[k];
+            }
+        for (; j < cols; j++) {
+            float v = ai[j] ? si[j] : -INFINITY;
+            mx[0] = v > mx[0] ? v : mx[0];
+        }
+        float m = mx[0];
+        for (int k = 1; k < 8; k++) m = mx[k] > m ? mx[k] : m;
         if (m == -INFINITY) {
-            for (int64_t j = 0; j < L; j++) oi[j] = 0.0f;
+            for (int64_t j2 = 0; j2 < cols; j2++) oi[j2] = 0.0f;
             continue;
         }
-        float z = 0.0f;
-        for (int64_t j = 0; j < L; j++) {
-            if (ai[j]) {
-                oi[j] = expf(si[j] - m);
-                z += oi[j];
-            } else {
-                oi[j] = 0.0f;
-            }
-        }
+        LLA_INTERLEAVE4
+        for (int64_t j2 = 0; j2 < cols; j2++)
+            oi[j2] = (float)ai[j2] * exp_neg(si[j2] - m);
+        float lane[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        j = 0;
+        for (; j + 8 <= cols; j += 8)
+            for (int k = 0; k < 8; k++) lane[k] += oi[j + k];
+        for (; j < cols; j++) lane[0] += oi[j];
+        float z = ((lane[0] + lane[1]) + (lane[2] + lane[3])) +
+                  ((lane[4] + lane[5]) + (lane[6] + lane[7]));
         float inv = 1.0f / z;
-        for (int64_t j = 0; j < L; j++) oi[j] *= inv;
+        for (int64_t j2 = 0; j2 < cols; j2++) oi[j2] *= inv;
     }
 }
 

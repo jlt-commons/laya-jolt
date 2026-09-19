@@ -44,7 +44,7 @@
 (ffi/defcfn allowed-mask* "lla_allowed_mask"
   [:pointer :int64 :int64 :int64 :pointer] :void)
 (ffi/defcfn masked-softmax* "lla_masked_softmax"
-  [:pointer :pointer :int64 :pointer] :void)
+  [:pointer :pointer :int64 :int64 :int64 :pointer] :void)
 (ffi/defcfn add-scaled* "lla_add_scaled"
   [:pointer :pointer :int64 :int64 :float :pointer] :void)
 (ffi/defcfn add-qtype-bias* "lla_add_qtype_bias"
@@ -243,6 +243,15 @@
   [t bytes]
   (ffi/segment (+ (ffi/address (:p t)) bytes)))
 
+(defn masked-softmax
+  "Row softmax over the allowed keys of a [rows x cols] score block; the
+  mask is the top-left [rows x cols] of `allowed` (leading dimension cols
+  here; `attention` passes a view into an [L x L] mask)."
+  [scores allowed rows cols]
+  (let [out (make [rows cols])]
+    (masked-softmax* (:p scores) (:p allowed) (long cols) (long rows) (long cols) (:p out))
+    out))
+
 (defn attention
   "softmax(scale * Q K^T over the allowed keys) V for every head. q/k/v
   head-major [H*L x hd] (lla_split_qkv's layout), allowed [L x L] bytes ->
@@ -253,27 +262,46 @@
   P V lands straight in the head's columns of ctx through ldc = H*hd. Only
   the masked softmax is a C loop. A query row with no allowed key (padding
   under a window) stays zero, as lla_masked_softmax leaves its P row zero.
-  The score buffers are reused across heads."
-  [qh kh vh allowed H L hd scale]
-  (let [d (* H hd)
-        ctx (make [L d])
-        S (make [L L])
-        P (make [L L])
-        head-bytes (* 4 L hd)]
-    (dotimes [h H]
-      (let [off (* h head-bytes)]
-        (cblas-sgemm* RowMajor NoTrans Trans
-                      (long L) (long L) (long hd)
-                      (float scale) (at-offset qh off) (long hd)
-                      (at-offset kh off) (long hd)
-                      0.0 (:p S) (long L))
-        (masked-softmax* (:p S) (:p allowed) (long L) (:p P))
-        (cblas-sgemm* RowMajor NoTrans NoTrans
-                      (long L) (long hd) (long L)
-                      1.0 (:p P) (long L)
-                      (at-offset vh off) (long hd)
-                      0.0 (at-offset ctx (* 4 h hd)) (long d))))
-    ctx))
+
+  With a `window` (a sliding layer) the queries go in blocks of 2*window
+  rows and each block only scores the keys within window of it, so an
+  L=1024 layer touches 256 keys per query instead of 1024. The mask is
+  still applied inside the block, so the band is only a saving, never the
+  semantics; the full path is one block of everything."
+  ([qh kh vh allowed H L hd scale] (attention qh kh vh allowed H L hd scale -1))
+  ([qh kh vh allowed H L hd scale window]
+   (let [d (* H hd)
+         ctx (make [L d])
+         block (if (neg? window) L (max 1 (* 2 window)))
+         reach (if (neg? window) 0 window)
+         max-cols (min L (+ block (* 2 reach)))
+         S (make [(min L block) max-cols])
+         P (make [(min L block) max-cols])
+         head-bytes (* 4 L hd)]
+     (dotimes [h H]
+       (loop [i0 0]
+         (when (< i0 L)
+           (let [i1 (min L (+ i0 block))
+                 k0 (max 0 (- i0 reach))
+                 k1 (min L (+ i1 reach))
+                 rows (- i1 i0)
+                 cols (- k1 k0)
+                 qoff (+ (* h head-bytes) (* 4 i0 hd))
+                 koff (+ (* h head-bytes) (* 4 k0 hd))]
+             (cblas-sgemm* RowMajor NoTrans Trans
+                           (long rows) (long cols) (long hd)
+                           (float scale) (at-offset qh qoff) (long hd)
+                           (at-offset kh koff) (long hd)
+                           0.0 (:p S) (long cols))
+             (masked-softmax* (:p S) (at-offset allowed (+ (* i0 L) k0)) (long L)
+                              (long rows) (long cols) (:p P))
+             (cblas-sgemm* RowMajor NoTrans NoTrans
+                           (long rows) (long hd) (long cols)
+                           1.0 (:p P) (long cols)
+                           (at-offset vh koff) (long hd)
+                           0.0 (at-offset ctx (* 4 (+ (* i0 d) (* h hd)))) (long d))
+             (recur i1)))))
+     ctx)))
 
 (defn add-qtype!
   "h += type_emb[qtype] per row (in place). h [n x d], bias [3 x d]."

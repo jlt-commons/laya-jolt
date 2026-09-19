@@ -74,10 +74,12 @@
     (t/add-scaled h2 mo 1.0)))
 
 (defn encoder-attention
-  "qkv-split, rope, masked attention, Wo. One batch row, [L x d] in and out."
+  "qkv-split, rope, masked attention (banded on sliding layers), Wo. One
+  batch row, [L x d] in and out."
   [w cfg i attn-in allowed L]
   (let [H (:num-heads cfg)
         hd (:head-dim cfg)
+        window (if (= "sliding_attention" (nth (:layer-types cfg) i)) (:window cfg) -1)
         qkv (t/mmul attn-in (w (wname i "attn.Wqkv.weight")))
         qh (t/make [(* H L) hd])
         kh (t/make [(* H L) hd])
@@ -87,7 +89,7 @@
         [cos-t sin-t] (rope-tables-for cfg i L)
         _ (t/rope-apply! qh cos-t sin-t H L hd)
         _ (t/rope-apply! kh cos-t sin-t H L hd)]
-    (t/attention qh kh vh allowed H L hd (/ 1.0 (Math/sqrt hd)))))
+    (t/attention qh kh vh allowed H L hd (/ 1.0 (Math/sqrt hd)) window)))
 
 (defn encode-row
   "Full encoder for one batch row: embeddings, 28 layers, final norm.
