@@ -1,6 +1,6 @@
 (ns laya.prepare-test
-  "jolt prepare must reproduce the reference conversion (python/prepare.py)
-  byte for byte: golden/prepare.edn pins the size and zlib CRC-32 of every
+  "jolt prepare must reproduce the reference Python conversion byte for
+  byte: golden/prepare.edn pins the size and zlib CRC-32 of every
   file the Python converter wrote for this checkpoint. Needs the checkpoint
   (LAYA_HOME, default ../laya); writes to target/prepare-test and removes it."
   (:require [clojure.edn :as edn]

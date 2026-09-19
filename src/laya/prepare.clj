@@ -1,7 +1,7 @@
 (ns laya.prepare
-  "jolt prepare: convert the Laya checkpoint into data/ (the port of
-  python/prepare.py, which stays as the reference; golden/prepare.edn pins
-  its output and test/laya/prepare_test.clj checks this one reproduces it).
+  "jolt prepare: convert the Laya checkpoint into data/ (the port of the
+  reference Python converter; golden/prepare.edn pins its output and
+  test/laya/prepare_test.clj checks this one reproduces it).
 
   - model.safetensors -> <out>/model/<tensor>.f32, raw little-endian f32.
     F16 tensors are widened by the C kernel (exact); F32 ones copied.

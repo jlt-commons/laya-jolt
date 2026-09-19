@@ -63,13 +63,6 @@
    :depends [kernels]
    :task (shell "jolt" "-M:prepare" "--laya" laya-home "--out" "data")}
 
-  traces
-  {:doc "re-dump the golden traces (torch CPU oracle) and the prepare checksums into golden/"
-   :task (do (shell ".venv/bin/python" "python/dump_traces.py" "--laya" laya-home)
-             (shell ".venv/bin/python" "python/prepare.py" "--laya" laya-home
-                    "--out" "target/prepare-oracle" "--golden" "golden/prepare.edn")
-             (fs/delete-tree "target/prepare-oracle"))}
-
   clean-native
   {:doc "remove the compiled kernel library"
    :task (do (fs/delete-if-exists "native/liblaya_kernels.dylib")

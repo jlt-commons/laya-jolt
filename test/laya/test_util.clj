@@ -10,7 +10,7 @@
   (or (System/getenv "LAYA_DATA") "data"))
 
 (def readers
-  "python/dump_traces.py writes dicts as #laya/omap [[k v] ...] so that
+  "The golden dumps write dicts as #laya/omap [[k v] ...] so that
   insertion order survives past 8 keys (an EDN map literal would not)."
   {'laya/omap seq/ordered-map})
 

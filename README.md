@@ -13,31 +13,6 @@ of typed questions, and returns calibrated typed answers.
 Everything is f32 end to end. F16 checkpoint weights are widened to f32 once,
 during `prepare`, so the numerics match the torch CPU oracle exactly.
 
-## Layout
-
-- `native/laya_kernels.c` — the tensor kernels (layernorm, gelu, rope,
-  attention, softmax, ...). Everything elementwise stays in C.
-- `src/laya/tensors.clj` — f32 tensor views over FFI buffers; `cblas_sgemm`.
-- `src/laya/model.clj` — encoder + head forward pass.
-- `src/laya/tokenizer.clj` — GPT-2 byte-level BPE with ICU NFC.
-- `src/laya/sequence.clj` — `build_sequence` (question -> markers + ids) and
-  a `json.dumps`-compatible serializer (the state JSON is tokenized, so its
-  bytes matter: Python float repr, escapes, `ensure_ascii`).
-- `src/laya/agent.clj` — `system_one` (temperature calibration, confidence).
-- `src/laya/email.clj` — `email_utils.py`: `clean-email-body`, `email-state`,
-  `email-questions`.
-- `src/laya/prepare.clj` — `jolt prepare`: checkpoint -> `data/` (f32 blobs +
-  EDN manifest/tokenizer/config), no Python involved.
-- `src/laya/server.clj` — the HTTP API (ring handler + `start`/`stop` +
-  `-main`), mirroring TypeSafe's `POST /v1/systemone`.
-- `src/laya/json.clj` — order-preserving JSON reader for requests (key
-  order is model input; `data.json` drops it past 8 keys).
-- `python/dump_traces.py` — dump golden traces from the torch oracle into
-  `golden/`. These are the contract the port is tested against.
-- `python/prepare.py` — the reference converter; `golden/prepare.edn` pins
-  the size and CRC-32 of everything it writes, and the test suite checks that
-  `jolt prepare` reproduces them byte for byte.
-
 ## Build and run
 
 ```
@@ -51,8 +26,8 @@ jolt binary              # standalone ./laya-server, self-tested against golden/
 
 `jolt kernels` shells out to `cc`. `jolt prepare` needs only the checkpoint
 (`LAYA_HOME`, default `../laya`) and the kernel library; it runs in a few
-seconds. `jolt traces` (regenerating `golden/`) is the one step that needs
-the `.venv` python with `torch`, `transformers`, `safetensors` and `numpy`.
+seconds. No Python is involved anywhere; `golden/` holds the traces dumped
+from the torch CPU oracle and is checked in.
 
 `jolt -M:run` prints the quickstart answer JSON. It should be identical to the
 `:system-one` value in `golden/readme.edn`.

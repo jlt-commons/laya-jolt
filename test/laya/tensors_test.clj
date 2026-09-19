@@ -3,7 +3,7 @@
 
   golden/masks.edn  - exact allowed-attention matrices from transformers'
                       own mask builders (padded batch, lens [64 45])
-  golden/layers/*   - f32 sidecars from dump_traces.py (ids, embeddings)
+  golden/layers/*   - f32 sidecars from the torch oracle dump (ids, embeddings)
   data/model/*      - the checkpoint's own weights, upcast f32"
   (:require [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]

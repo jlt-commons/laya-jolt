@@ -14,7 +14,7 @@
 (def tok (delay (tk/load (str data-dir "/tokenizer.edn"))))
 
 (def cases
-  "Mirror of TOK_CASES in python/dump_traces.py (also listed in
+  "The tokenizer cases from the golden dump (also listed in
   golden/cases.edn :tok-cases, which the tests check against)."
   ["Which department should handle this email?"
    " choice question: invoices, payments, refunds"
