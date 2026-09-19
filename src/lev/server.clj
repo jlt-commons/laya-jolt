@@ -508,6 +508,7 @@
                        (map-indexed vector tok-cases))
         nfc-ok (= (apply str (repeat 300 "क़"))
                   (tk/nfc (apply str (repeat 300 "क़"))))]
+    (vec (remove nil?
     [["README quickstart answer matches the Python engine" answer-ok
       (when-not answer-ok (str "got " (seq/json-str got)))]
      ["tokenizer reproduces golden/tok.edn" tok-ok nil]
@@ -519,7 +520,7 @@
                                 [(contains? #{true false} (< 0.5 (get-in out ["answers" "is_phishing" "noul"])))
                                  (str name ": " (seq/json-str (get-in out ["answers" "is_phishing"])))])
                               (catch Exception e [false (ex-message e)]))]
-         [(str "the thinker answers (" (lev.llm/version) ")") ok detail]))]))
+         [(str "the thinker answers (" (lev.llm/version) ")") ok detail]))]))))
 
 (defn -main
   "jolt -M:serve [--data DIR] [--port N] [--host ADDR] [--api-key KEY]
