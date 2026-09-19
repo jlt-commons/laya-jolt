@@ -494,7 +494,13 @@
                     rows)
         batched (laya.model/forward-batch w cfg rows)
         gold-logits (t/load-file (str golden-dir "/layers/logits.f32") [2 4])
-        close (fn [a b tol] (every? true? (map #(< (Math/abs (- (double %1) (double %2))) tol) a b)))]
+        ;; relative past magnitude 1: the act logits sit around 4000 (the
+        ;; head is saturated), where an f32 ulp is 5e-4, and a BLAS picks a
+        ;; different summation order for a different M (OpenBLAS: batched
+        ;; vs alone differ by ~3e-7 of the value; Accelerate: not at all)
+        close (fn [a b tol] (every? true? (map #(<= (Math/abs (- (double %1) (double %2)))
+                                                    (* tol (max 1.0 (Math/abs (double %2)))))
+                                               a b)))]
     (is (= 2 (count batched)))
     (doseq [r [0 1]]
       (let [[lg act] (nth batched r)
@@ -508,6 +514,6 @@
     (testing "row order and batch size do not matter"
       (let [[[lg-b act-b]] (laya.model/forward-batch w cfg [(rows 1)])
             swapped (laya.model/forward-batch w cfg [(rows 1) (rows 0)])]
-        (is (close lg-b (first (nth batched 1)) 1e-6))
-        (is (close (first (second swapped)) (first (nth batched 0)) 1e-6))
-        (is (close (second (first swapped)) (second (nth batched 1)) 1e-6))))))
+        (is (close lg-b (first (nth batched 1)) 1e-5))
+        (is (close (first (second swapped)) (first (nth batched 0)) 1e-5))
+        (is (close (second (first swapped)) (second (nth batched 1)) 1e-5))))))
