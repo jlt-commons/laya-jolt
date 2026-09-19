@@ -1,6 +1,7 @@
 (ns laya.test-util
   "Shared helpers for the parity suites."
   (:require [clojure.edn :as edn]
+            [laya.agent :as ag]
             [laya.sequence :as seq]))
 
 (def golden-dir
@@ -8,6 +9,11 @@
 
 (def data-dir
   (or (System/getenv "LAYA_DATA") "data"))
+
+(def agent
+  "The english checkpoint, loaded once for the whole suite: every load is
+  ~1.7 GB of f32, and the CI mac runner has 7 GB."
+  (delay (ag/load-agent data-dir)))
 
 (def readers
   "The golden dumps write dicts as #laya/omap [[k v] ...] so that

@@ -12,7 +12,7 @@
             [laya.test-util :as tu]
             [laya.workflows :as wf]))
 
-(def agent (delay (ag/load-agent tu/data-dir)))
+(def agent tu/agent)
 (def workflows (delay (wf/load-workflows ["workflows"])))
 
 (defn- req [method uri & {:keys [body headers]}]

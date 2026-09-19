@@ -7,7 +7,7 @@
             [laya.sequence :as seq]
             [laya.test-util :as tu]))
 
-(def agent (delay (laya.agent/load-agent tu/data-dir)))
+(def agent tu/agent)
 
 (deftest demo-is-the-quickstart
   (testing "run demo prints the golden README answer"

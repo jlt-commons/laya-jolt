@@ -19,7 +19,7 @@
 (wf/load-workflow "workflows/email.clj")
 (alias 'email 'workflows.email)
 
-(def agent (delay (ag/load-agent data-dir)))
+(def agent tu/agent)
 
 (def state
   (array-map
