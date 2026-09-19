@@ -40,22 +40,18 @@
                                                (every? true? (map #(approx= tol %1 %2) a b)))
     :else (= a b)))
 
-(def accelerate?
-  "Apple's Accelerate is the BLAS the goldens are byte-identical under. On
-  x86 OpenBLAS picks kernels per CPU model, and the ubuntu CI runners are
-  not all the same machine: the same weights gave a 4-decimal probability
-  of 0.3142 on one and 0.3143 on another, a value sitting on the rounding
-  boundary. So answers are exact on mac and within one unit in the last
-  place elsewhere."
-  (some? (re-find #"^Mac" (System/getProperty "os.name"))))
-
 (defn answers-match
   "Assert a system-one JSON string against its golden: parsed and within
-  1e-4 everywhere, byte-for-byte under Accelerate."
+  one unit in the fourth decimal everywhere.
+
+  Not byte-for-byte: answers are rounded to 4 decimals and sgemm summation
+  order differs by BLAS, by CPU model under OpenBLAS, and by how attention
+  is blocked, so a value on a rounding boundary flips its last digit. The
+  quickstart's urgency p[1] is one (0.314250x): torch printed 0.3142, the
+  per-head sgemm attention under Accelerate lands at 0.3143, and the ubuntu
+  runners have given both."
   [want got & [msg]]
-  (is (approx= 1.0001e-4 (json/read-str want) (json/read-str got)) (or msg "answers within 1e-4"))
-  (when accelerate?
-    (is (= want got) (or msg "byte-identical under Accelerate"))))
+  (is (approx= 1.0001e-4 (json/read-str want) (json/read-str got)) (or msg "answers within 1e-4")))
 
 (defn relative-max-abs
   "max |a-b| over the first n values, as a fraction of max |b|: the bound

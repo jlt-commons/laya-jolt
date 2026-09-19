@@ -45,10 +45,6 @@
   [:pointer :int64 :int64 :int64 :pointer] :void)
 (ffi/defcfn masked-softmax* "lla_masked_softmax"
   [:pointer :pointer :int64 :pointer] :void)
-(ffi/defcfn scores* "lla_scores"
-  [:pointer :pointer :int64 :int64 :int64 :double :pointer] :void)
-(ffi/defcfn weighted-sum* "lla_weighted_sum"
-  [:pointer :pointer :int64 :int64 :int64 :pointer] :void)
 (ffi/defcfn add-scaled* "lla_add_scaled"
   [:pointer :pointer :int64 :int64 :float :pointer] :void)
 (ffi/defcfn add-qtype-bias* "lla_add_qtype_bias"
@@ -242,29 +238,42 @@
     (allowed-mask* (:p att) (long b) (long L) (long window) (:p m))
     m))
 
-(defn masked-softmax
-  [scores allowed L]
-  (let [out (make [(* L L)])]
-    (masked-softmax* (:p scores) (:p allowed) (long L) (:p out))
-    out))
+(defn- at-offset
+  "Pointer `bytes` past the start of tensor t (a view, not a copy)."
+  [t bytes]
+  (ffi/segment (+ (ffi/address (:p t)) bytes)))
 
-(defn scores
-  "Q@K^T*scale for one head: q [n x hd], k [m x hd] -> [n x m]."
-  [q k scale]
-  (let [[n d] (:shape q)
-        [m d2] (:shape k)
-        out (make [n m])]
-    (scores* (:p q) (:p k) (long n) (long m) (long d) (double scale) (:p out))
-    out))
+(defn attention
+  "softmax(scale * Q K^T over the allowed keys) V for every head. q/k/v
+  head-major [H*L x hd] (lla_split_qkv's layout), allowed [L x L] bytes ->
+  token-major ctx [L x (H*hd)].
 
-(defn weighted-sum
-  "P @ V: p [n x m], v [m x d] -> [n x d]."
-  [p v]
-  (let [[n m] (:shape p)
-        [m2 d] (:shape v)
-        out (make [n d])]
-    (weighted-sum* (:p p) (:p v) (long n) (long m) (long d) (:p out))
-    out))
+  The two products per head are sgemm calls, the same two gemms torch's
+  math-path SDPA runs: each head's q/k/v block is already contiguous, and
+  P V lands straight in the head's columns of ctx through ldc = H*hd. Only
+  the masked softmax is a C loop. A query row with no allowed key (padding
+  under a window) stays zero, as lla_masked_softmax leaves its P row zero.
+  The score buffers are reused across heads."
+  [qh kh vh allowed H L hd scale]
+  (let [d (* H hd)
+        ctx (make [L d])
+        S (make [L L])
+        P (make [L L])
+        head-bytes (* 4 L hd)]
+    (dotimes [h H]
+      (let [off (* h head-bytes)]
+        (cblas-sgemm* RowMajor NoTrans Trans
+                      (long L) (long L) (long hd)
+                      (float scale) (at-offset qh off) (long hd)
+                      (at-offset kh off) (long hd)
+                      0.0 (:p S) (long L))
+        (masked-softmax* (:p S) (:p allowed) (long L) (:p P))
+        (cblas-sgemm* RowMajor NoTrans NoTrans
+                      (long L) (long hd) (long L)
+                      1.0 (:p P) (long L)
+                      (at-offset vh off) (long hd)
+                      0.0 (at-offset ctx (* 4 h hd)) (long d))))
+    ctx))
 
 (defn add-qtype!
   "h += type_emb[qtype] per row (in place). h [n x d], bias [3 x d]."

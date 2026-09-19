@@ -15,13 +15,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* forward decls: lla_attention calls lla_scores/lla_masked_softmax, which
- * are defined later in the file */
-void lla_scores(const float *q, const float *k, int64_t n, int64_t m,
-                int64_t d, double scale, float *out);
-void lla_masked_softmax(const float *scores, const uint8_t *allowed,
-                        int64_t L, float *out);
-
 /* ---------------- gather + layernorm ---------------- */
 
 /* token embedding gather: rows of emb selected by ids -> out [n x d].
@@ -169,35 +162,6 @@ void lla_split_qkv(const float *qkv, int64_t L, int64_t H, int64_t hd,
     }
 }
 
-/* full per-layer attention: head-major q,k,v [H*L x hd] + allowed [L x L]
- * -> token-major out [L x (H*hd)]. scores/softmax/weighted-sum per head,
- * writing straight to the token-major slot. */
-void lla_attention(const float *qh, const float *kh, const float *vh,
-                   const uint8_t *allowed, int64_t H, int64_t L, int64_t hd,
-                   double scale, float *out) {
-    float *S = malloc(sizeof(float) * L * L);
-    float *P = malloc(sizeof(float) * L * L);
-    for (int64_t h = 0; h < H; h++) {
-        const float *q = qh + h * L * hd;
-        const float *k = kh + h * L * hd;
-        const float *v = vh + h * L * hd;
-        lla_scores(q, k, L, L, hd, scale, S);
-        lla_masked_softmax(S, allowed, L, P);
-        for (int64_t i = 0; i < L; i++) {
-            float *oi = out + (i * H + h) * hd;
-            memset(oi, 0, sizeof(float) * hd);
-            for (int64_t j = 0; j < L; j++) {
-                float w = P[i * L + j];
-                if (w == 0.0f) continue;
-                const float *vj = v + j * hd;
-                for (int64_t x = 0; x < hd; x++) oi[x] += w * vj[x];
-            }
-        }
-    }
-    free(S);
-    free(P);
-}
-
 /* head-major [H x L x hd] -> token-major [L x (H*hd)] */
 void lla_merge_heads(const float *src, int64_t H, int64_t L, int64_t hd,
                      float *x) {
@@ -225,7 +189,7 @@ void lla_allowed_mask(const uint8_t *att, int64_t b, int64_t L, int64_t window,
     }
 }
 
-/* ---------------- attention scores ---------------- */
+/* ---------------- attention softmax (the two gemms are cblas, see laya.tensors/attention) ---------------- */
 
 /* softmax over allowed keys per query row, torch-style with max subtraction.
  * scores: [L x L] f32 (already scaled). Rows with zero allowed keys are
@@ -254,39 +218,6 @@ void lla_masked_softmax(const float *scores, const uint8_t *allowed, int64_t L,
         }
         float inv = 1.0f / z;
         for (int64_t j = 0; j < L; j++) oi[j] *= inv;
-    }
-}
-
-/* qk^T for one head block: A [n x d], B [m x d] -> S [n x m], scaled.
- * Kept here because a deinterleaved sgemm per head would need d==k packing;
- * dot over d is a single pass and stays cache-hot. */
-void lla_scores(const float *q, const float *k, int64_t n, int64_t m,
-                int64_t d, double scale, float *out) {
-    for (int64_t i = 0; i < n; i++) {
-        const float *qi = q + i * d;
-        float *oi = out + i * m;
-        for (int64_t j = 0; j < m; j++) {
-            const float *kj = k + j * d;
-            double s = 0.0;
-            for (int64_t t = 0; t < d; t++) s += (double)qi[t] * kj[t];
-            oi[j] = (float)(s * scale);
-        }
-    }
-}
-
-/* weighted value sum P [n x m] @ V [m x d] -> O [n x d] */
-void lla_weighted_sum(const float *p, const float *v, int64_t n, int64_t m,
-                      int64_t d, float *out) {
-    for (int64_t i = 0; i < n; i++) {
-        const float *pi = p + i * m;
-        float *oi = out + i * d;
-        memset(oi, 0, sizeof(float) * d);
-        for (int64_t j = 0; j < m; j++) {
-            float w = pi[j];
-            if (w == 0.0f) continue;
-            const float *vj = v + j * d;
-            for (int64_t t = 0; t < d; t++) oi[t] += w * vj[t];
-        }
     }
 }
 

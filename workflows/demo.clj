@@ -1,7 +1,7 @@
 (ns workflows.demo
   "README quickstart as a workflow: the example email and its four questions,
-  mirroring the Python `Agent.system_one` example. Its answer must be
-  byte-identical to golden/readme.edn :system-one.
+  mirroring the Python `Agent.system_one` example. Its answer must match
+  golden/readme.edn :system-one to the fourth decimal.
 
   Usage: jolt -M:run demo")
 

@@ -21,8 +21,6 @@
 
 (ffi/defcfn split-qkv* "lla_split_qkv"
   [:pointer :int64 :int64 :int64 :pointer :pointer :pointer] :void)
-(ffi/defcfn attention* "lla_attention"
-  [:pointer :pointer :pointer :pointer :int64 :int64 :int64 :double :pointer] :void)
 (ffi/defcfn add-bias! "lla_add_bias" [:pointer :pointer :int64 :int64] :void)
 
 (def ^:private rope-cache (atom {}))
@@ -78,8 +76,7 @@
 (defn encoder-attention
   "qkv-split, rope, masked attention, Wo. One batch row, [L x d] in and out."
   [w cfg i attn-in allowed L]
-  (let [d (:hidden-size cfg)
-        H (:num-heads cfg)
+  (let [H (:num-heads cfg)
         hd (:head-dim cfg)
         qkv (t/mmul attn-in (w (wname i "attn.Wqkv.weight")))
         qh (t/make [(* H L) hd])
@@ -89,13 +86,8 @@
                       (t/ptr qh) (t/ptr kh) (t/ptr vh))
         [cos-t sin-t] (rope-tables-for cfg i L)
         _ (t/rope-apply! qh cos-t sin-t H L hd)
-        _ (t/rope-apply! kh cos-t sin-t H L hd)
-        ctx (t/make [L d])]
-    (attention* (t/ptr qh) (t/ptr kh) (t/ptr vh) (t/ptr allowed)
-                (long H) (long L) (long hd)
-                (/ 1.0 (Math/sqrt hd))
-                (t/ptr ctx))
-    ctx))
+        _ (t/rope-apply! kh cos-t sin-t H L hd)]
+    (t/attention qh kh vh allowed H L hd (/ 1.0 (Math/sqrt hd)))))
 
 (defn encode-row
   "Full encoder for one batch row: embeddings, 28 layers, final norm.
@@ -139,11 +131,7 @@
         _ (split-qkv* (t/ptr qkv) (long L) (long H) (long hd)
                       (t/ptr qh) (t/ptr kh) (t/ptr vh))
         ;; no rope in the head; straight scores
-        ctx (t/make [L d])
-        _ (attention* (t/ptr qh) (t/ptr kh) (t/ptr vh) (t/ptr allowed)
-                      (long H) (long L) (long hd)
-                      (/ 1.0 (Math/sqrt hd))
-                      (t/ptr ctx))
+        ctx (t/attention qh kh vh allowed H L hd (/ 1.0 (Math/sqrt hd)))
         out (t/mmul ctx (w (str prefix ".self_attn.out_proj.weight")))]
     (add-bias! (t/ptr out) (t/ptr (w (str prefix ".self_attn.out_proj.bias")))
                (long L) (long d))

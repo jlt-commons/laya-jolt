@@ -246,3 +246,60 @@
   (is (= [0.5 0.3] (laya.model/top2 [0.1 0.3 0.5])) "ascending input")
   (is (= [0.5 0.3] (laya.model/top2 [0.3 0.5 0.1])) "mixed")
   (is (= [0.4 0.4] (laya.model/top2 [0.4 0.2 0.4])) "ties keep both"))
+
+;; --- attention: per-head sgemm + masked softmax vs a double reference ------
+
+(defn- lcg-floats
+  "Deterministic pseudo-random floats in [-0.5, 0.5): no java.util.Random
+  needed, and the same numbers on every platform."
+  [seed n]
+  (loop [x (long seed), i 0, acc (transient [])]
+    (if (= i n)
+      (persistent! acc)
+      ;; rand_r's 31-bit recurrence: the product stays well inside a long
+      (let [x (mod (+ (* x 1103515245) 12345) 2147483648)]
+        (recur x (inc i) (conj! acc (- (/ (double x) 2147483648.0) 0.5)))))))
+
+(defn- ref-attention
+  "softmax(scale * q k^T, over allowed keys) v, per head, in double precision.
+  qh/kh/vh flat head-major [H x L x hd]; allowed flat [L x L] 0/1.
+  Answers the token-major [L x (H*hd)] context as a flat vector."
+  [qh kh vh allowed H L hd scale]
+  (let [at (fn [xs h t x] (double (nth xs (+ (* (+ (* h L) t) hd) x))))]
+    (vec
+     (for [i (range L) h (range H) x (range hd)]
+       (let [js (filter #(pos? (nth allowed (+ (* i L) %))) (range L))
+             s (map (fn [j] (* scale (reduce + (map #(* (at qh h i %) (at kh h j %)) (range hd))))) js)]
+         (if (empty? js)
+           0.0
+           (let [m (reduce max s)
+                 e (map #(Math/exp (- % m)) s)
+                 z (reduce + e)]
+             (reduce + (map (fn [j ej] (* (/ ej z) (at vh h j x))) js e)))))))))
+
+(deftest attention-matches-double-reference
+  (let [H 2 L 7 hd 4 d (* H hd)
+        scale (/ 1.0 (Math/sqrt hd))
+        qh (lcg-floats 1 (* H L hd))
+        kh (lcg-floats 2 (* H L hd))
+        vh (lcg-floats 3 (* H L hd))
+        ;; token 6 is padding; window 2 makes it a banded matrix too
+        att (t/from-bytes [1 1 1 1 1 1 0] [1 L])
+        run (fn [allowed]
+              (let [ctx (t/attention (t/reshape (t/from-floats qh) [(* H L) hd])
+                                     (t/reshape (t/from-floats kh) [(* H L) hd])
+                                     (t/reshape (t/from-floats vh) [(* H L) hd])
+                                     allowed H L hd scale)
+                    ;; the allowed matrix is uint8, not f32: read it as bytes
+                    want (ref-attention qh kh vh (mapv #(jolt.ffi/read (t/ptr allowed) :uint8 %) (range (* L L))) H L hd scale)]
+                (is (= [L d] (t/shape ctx)))
+                (reduce max (map #(Math/abs (- (double %1) %2)) (t/to-floats ctx) want))))]
+    (is (< (run (t/allowed-mask att 0 L -1)) 1e-6) "full attention with a padded key")
+    (is (< (run (t/allowed-mask att 0 L 2)) 1e-6) "sliding window |i-j|<=2")
+    (testing "a query row with no allowed key (the pad row under a window) is left at zero"
+      (let [allowed (t/allowed-mask att 0 L 0)   ; only the diagonal, and the pad column is masked
+            ctx (t/attention (t/reshape (t/from-floats qh) [(* H L) hd])
+                             (t/reshape (t/from-floats kh) [(* H L) hd])
+                             (t/reshape (t/from-floats vh) [(* H L) hd])
+                             allowed H L hd scale)]
+        (is (every? zero? (subvec (t/to-floats ctx) (* 6 d) (* 7 d))))))))

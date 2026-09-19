@@ -3,9 +3,8 @@
 Pure-Clojure inference for the Laya decision models, running on
 [jolt](https://github.com/jolt-lang/jolt) (Chez Scheme, no JVM). Same weights,
 same outputs: the stack reproduces the Python package's `Agent.system_one`
-answer for the README quickstart byte-for-byte (under Apple's Accelerate;
-within one unit in the fourth decimal under OpenBLAS), on all three
-checkpoints of the [convaiinnovations/laya](https://huggingface.co/convaiinnovations/laya)
+answer for the README quickstart to the fourth decimal it prints, on all
+three checkpoints of the [convaiinnovations/laya](https://huggingface.co/convaiinnovations/laya)
 bundle, and picks the checkpoint per request the way the package's `Router`
 does.
 
@@ -88,8 +87,8 @@ oracle (english at the root, `golden/typed-decisions/` and
 `LAYA_CHECKPOINTS=typed-decisions` (comma-separated, empty for none)
 restricts the extra-checkpoint parity suite, which is how CI tests one
 checkpoint per process. `jolt -M:run demo` prints the quickstart answer
-JSON: the `:system-one` value in `golden/readme.edn` (byte for byte under
-Accelerate, see Status).
+JSON: the `:system-one` value in `golden/readme.edn` (to the fourth
+decimal, see Status).
 
 Answers come back as ordered maps with string keys, in the shape of the
 Python dicts. Because option order and question order are part of the model
@@ -413,9 +412,12 @@ suffixes in `deps.edn` if your distro's `libicuuc.so` version is not listed.
 Encoder, head, both tokenizers, sequence, agent, the workflows and the
 checkpoint conversion all match their golden traces on all three
 checkpoints (`golden/`, `golden/typed-decisions/`, `golden/multilingual/`).
-`system-one` on the quickstart case is byte-identical to the Python output
-on each of them under Accelerate; language detection, the Router's
-decisions and the presets match the Python package on every pinned case.
+`system-one` on the quickstart case matches the Python output on each of
+them to the four decimals it prints; one value (`urgency` p[1], 0.314250x)
+sits on a rounding boundary and prints 0.3142 or 0.3143 depending on the
+BLAS and how attention is blocked, so exact bytes are not the contract.
+Language detection, the Router's decisions and the presets match the
+Python package on every pinned case.
 
 Per-forward temporaries live in an ffi arena that closes with the call, so a
 long-running process stays at the size of the loaded weights (~1.7 GB f32

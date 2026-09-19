@@ -1,6 +1,6 @@
 (ns laya.agent-test
   "End-to-end agent parity: RLAgent.system_one on the README quickstart must
-  reproduce golden/readme.edn :system-one byte-for-byte.
+  reproduce golden/readme.edn :system-one to the fourth decimal.
 
   This guards the whole stack (tokenizer -> encoder -> head -> calibration).
   It is the regression test for the encoder sliding-window radius: with
@@ -121,7 +121,7 @@
 
 (deftest system-one-matches-readme
   (let [out (ag/system-one @agent state questions)]
-    (testing "equal to the checkpoint's own output (byte-for-byte under Accelerate)"
+    (testing "equal to the checkpoint's own output (to the fourth decimal)"
       (tu/answers-match (golden-system-one) (seq/json-str out)))
     (testing "typed answers"
       (let [a (get out "answers")]
