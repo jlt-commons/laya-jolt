@@ -1,13 +1,14 @@
 (ns laya.run
-  "jolt -M:run <workflow> [input] [--options JSON] [--data DIR] [--workflows DIR[:DIR]]
-              [--max-len N] [--head-max-len N]
+  "jolt -M:run <workflow> [input] [--options JSON] [--constraints JSON] [--data DIR]
+              [--workflows DIR[:DIR]] [--max-len N] [--head-max-len N]
    jolt -M:run --list
 
   Run one workflow (laya.workflows) against the prepared model and print the
   answer JSON. `input` is a JSON document (object, array or string) handed
   to the workflow's `state` fn, or @path to read it from a file; without it
   the state fn gets nil (demo then picks its example). --options is a JSON
-  object for workflows whose `questions` take options."
+  object for workflows whose `questions` take options; --constraints a JSON
+  list of laya.constraints added to the workflow's own."
   (:require [clojure.string :as str]
             [laya.agent :as ag]
             [laya.config :as cfg]
@@ -25,16 +26,22 @@
 
 (defn run-workflow
   "Load the workflows under dirs, run `name` on the JSON input (string or
-  nil) with the JSON options (string or nil); answers as an ordered map."
-  [agent dirs name input options]
-  (let [wfs (wf/load-workflows dirs)
-        w (or (get wfs name)
-              (throw (ex-info (str "no workflow named " (pr-str name) "; known: "
-                                   (str/join ", " (sort (keys wfs))))
-                              {:type :invalid-request :workflow name :known (sort (keys wfs))})))
-        state (wf/state w (parse-json-arg input "input"))
-        questions (wf/questions w (or (parse-json-arg options "--options") {}))]
-    (ag/system-one agent state questions)))
+  nil) with the JSON options (string or nil) and the JSON constraints
+  (string or nil, added to the workflow's own); answers as an ordered map."
+  ([agent dirs name input options] (run-workflow agent dirs name input options nil))
+  ([agent dirs name input options constraints]
+   (let [wfs (wf/load-workflows dirs)
+         w (or (get wfs name)
+               (throw (ex-info (str "no workflow named " (pr-str name) "; known: "
+                                    (str/join ", " (sort (keys wfs))))
+                               {:type :invalid-request :workflow name :known (sort (keys wfs))})))
+         opts (or (parse-json-arg options "--options") {})
+         state (wf/state w (parse-json-arg input "input"))
+         questions (wf/questions w opts)
+         own (wf/constraints w opts)
+         theirs (parse-json-arg constraints "--constraints")]
+     (ag/system-one agent state questions
+                    {:constraints (when (or own theirs) (vec (concat own theirs)))}))))
 
 (defn list-workflows
   "Print name, source file and description of every workflow under dirs."
@@ -58,8 +65,8 @@
       (try
         (let [agent (ag/load-agent (cfg/setting ctx "--data" "LAYA_DATA" :data "data")
                                    (cfg/limits ctx "english"))]
-          (println (seq/json-str (run-workflow agent dirs name input (get opts "--options")))))
+          (println (seq/json-str (run-workflow agent dirs name input (get opts "--options") (get opts "--constraints")))))
         (catch Exception e
-          (if (#{:invalid-request :invalid-question} (:type (ex-data e)))
+          (if (#{:invalid-request :invalid-question :invalid-constraint} (:type (ex-data e)))
             (do (binding [*out* *err*] (println "jolt run:" (ex-message e))) (System/exit 1))
             (throw e)))))))

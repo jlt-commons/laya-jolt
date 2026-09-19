@@ -126,10 +126,12 @@
                                 :body (seq/json-str (seq/ordered-map [["input" (seq/ordered-map [["subject" "Support request"] ["body" raw] ["from" "someone@example.com"]])]]))))
             want (json/read-str result)]
         (is (= 200 st))
-        (is (= ["model" "answers" "usage" "routing" "workflow" "state"] (keys b)))
+        (is (= ["model" "answers" "usage" "constraints" "routing" "workflow" "state"] (keys b)))
         (is (= "email" (get b "workflow")))
         (is (= (into {} state) (into {} (get b "state"))) "the cleaned email the model read")
-        (is (= (dissoc (get want "answers") "wide") (get b "answers")))))
+        (is (= (dissoc (get want "answers") "wide")
+               (into {} (map (fn [[k a]] [k (dissoc a "decided")]) (get b "answers"))))
+            "the golden answers, plus the workflow's constrained decisions")))
     (testing "options reach the workflow; a bare string input is allowed"
       (let [[st b] (call h (req :post "/v1/workflows/email"
                                 :body (seq/json-str {"input" "Refund me" "options" {"categories" {"refund" "money back" "other" "else"}}})))]
@@ -250,3 +252,62 @@
         (is (= "401" (str/trim denied))))
       (finally
         (srv/stop server)))))
+
+(deftest constraints-on-the-wire
+  (let [h (srv/handler @agent {:workflows @workflows})
+        base (json/read-str (readme-request))
+        post (fn [path body] (call h (req :post path :body (seq/json-str body))))]
+    (testing "constraints decide jointly; the report rides along after usage"
+      (let [[st b] (post "/v1/systemone" (assoc base "constraints" [["implies" ["department" "billing"] ["churn_risk" true]]]))]
+        (is (= 200 st))
+        (is (= ["model" "answers" "usage" "constraints" "routing"] (keys b)))
+        (is (= "billing" (get-in b ["answers" "department" "decided"])))
+        (is (true? (get-in b ["answers" "churn_risk" "decided"])))
+        (is (= 0.4312 (get-in b ["answers" "churn_risk" "noul"])))
+        (is (= {"feasible" true "decoder" "exact" "exact" true "violations" []} (get b "constraints")))))
+    (testing "without them the body is exactly what it was"
+      (let [[_ b] (post "/v1/systemone" base)]
+        (is (= ["model" "answers" "usage" "routing"] (keys b)))
+        (is (not (contains? (get-in b ["answers" "department"]) "decided")))))
+    (testing "a bad constraint is a 422 at its index, before any inference"
+      (let [[st b] (post "/v1/systemone" (assoc base "constraints" [["not" ["churn_risk" true]] ["implies" ["department" "legal"] ["churn_risk" true]]]))]
+        (is (= 422 st))
+        (is (= ["body" "constraints" 1] (get-in b ["detail" 0 "loc"])))
+        (is (str/includes? (get-in b ["detail" 0 "msg"]) "\"legal\" is not an option of \"department\""))
+        (is (= "value_error" (get-in b ["detail" 0 "type"]))))
+      (let [[st b] (post "/v1/systemone" (assoc base "constraints" {"implies" 1}))]
+        (is (= 422 st))
+        (is (= ["body" "constraints"] (get-in b ["detail" 0 "loc"]))))
+      (let [[st b] (post "/v1/systemone" (assoc base "on_infeasible" "explode"))]
+        (is (= 422 st))
+        (is (= ["body" "on_infeasible"] (get-in b ["detail" 0 "loc"])))))
+    (testing "on_infeasible: min_violations reports, raise is a 422 with the violations"
+      (let [contradiction [["all-of" ["churn_risk" true] ["churn_risk" false]]]
+            [st b] (post "/v1/systemone" (assoc base "constraints" contradiction))]
+        (is (= 200 st))
+        (is (false? (get-in b ["constraints" "feasible"])))
+        (is (= contradiction (get-in b ["constraints" "violations"])))
+        (let [[st b] (post "/v1/systemone" (assoc base "constraints" contradiction "on_infeasible" "raise"))]
+          (is (= 422 st))
+          (is (= ["body" "constraints"] (get-in b ["detail" 0 "loc"])))
+          (is (= "infeasible" (get-in b ["detail" 0 "type"])))
+          (is (= contradiction (get-in b ["detail" 0 "violations"]))))))
+    (testing "a workflow's own constraints apply, and the request's add to them"
+      (let [[st b] (post "/v1/workflows/email" {"input" {"subject" "WIN A PRIZE" "body" "You have been selected! Click here to claim your reward now!!!"}})]
+        (is (= 200 st))
+        (is (contains? (get-in b ["answers" "is_spam"]) "decided"))
+        (is (true? (get-in b ["constraints" "feasible"])))
+        (when (true? (get-in b ["answers" "is_spam" "decided"]))
+          (is (false? (get-in b ["answers" "needs_reply" "decided"])) "spam implies no reply")))
+      (let [[st b] (post "/v1/workflows/email" {"input" "Refund me" "constraints" [["min-level" "urgency" 2]]})]
+        (is (= 200 st))
+        (is (= 2 (get-in b ["answers" "urgency" "decided"]))))
+      (let [[st b] (post "/v1/workflows/email" {"input" "Refund me" "constraints" [["min-level" "urgency" 5]]})]
+        (is (= 422 st))
+        (is (= ["body" "constraints" 0] (get-in b ["detail" 0 "loc"])) "indexed among the request's own")))
+    (testing "the listing shows a workflow's constraints"
+      (let [[_ b] (call h (req :get "/v1/workflows"))]
+        (is (= [["implies" ["is_spam" true] ["needs_reply" false]]
+                ["implies" ["is_phishing" true] ["needs_reply" false]]]
+               (get-in b ["workflows" "email" "constraints"])))
+        (is (= [] (get-in b ["workflows" "demo" "constraints"])))))))

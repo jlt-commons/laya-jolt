@@ -23,7 +23,24 @@
         want (json/read-str result)
         got (json/read-str (seq/json-str out))]
     (testing "same answers as the golden email fan-out, minus the extra wide question"
-      (is (= (dissoc (get want "answers") "wide") (get got "answers"))))))
+      (is (= (dissoc (get want "answers") "wide")
+             (into {} (map (fn [[k a]] [k (dissoc a "decided")]) (get got "answers"))))))
+    (testing "the email workflow's constraints decide the answers"
+      (is (every? #(contains? % "decided") (vals (get got "answers"))))
+      (is (true? (get-in got ["constraints" "feasible"]))))))
+
+(deftest constraints-from-the-command-line
+  (let [out (run/run-workflow @agent ["workflows"] "email" "{\"subject\": \"s\", \"body\": \"Refund me\"}" nil
+                              "[[\"min-level\", \"urgency\", 2]]")]
+    (is (= 2 (get-in out ["answers" "urgency" "decided"])))
+    (is (= [] (get-in out ["constraints" "violations"])) "feasible: none violated"))
+  (spit "target/run-constraints.json" "[[\"max-level\", \"urgency\", 0]]")
+  (let [out (run/run-workflow @agent ["workflows"] "email" "{\"subject\": \"s\", \"body\": \"Refund me\"}" nil
+                              "@target/run-constraints.json")]
+    (is (= 0 (get-in out ["answers" "urgency" "decided"]))))
+  (jolt.host/delete-tree! "target/run-constraints.json")
+  (is (thrown-with-msg? Exception #"constraints is not valid JSON"
+                        (run/run-workflow @agent ["workflows"] "email" nil nil "[oops"))))
 
 (deftest runner-errors
   (testing "unknown workflow lists the known ones"

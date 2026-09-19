@@ -87,3 +87,21 @@
       (is (= {"subject" "S" "body" "b" "from" "a@b.c"}
              (wf/state (wfs "email") {"subject" "S" "body" "b" "from" "a@b.c"})))
       (is (= ["department" "urgency" "churn_risk" "is_phishing"] (keys (wf/questions (wfs "demo"))))))))
+
+(deftest workflows-may-declare-constraints
+  (fresh!)
+  (write-workflow! (str tmp "/f") "ruled.clj"
+                   "(ns workflows.ruled)
+(defn questions [] {\"a\" {\"type\" \"noul\" \"instructions\" \"?\"} \"b\" {\"type\" \"noul\" \"instructions\" \"?\"}})
+(defn constraints
+  ([] (constraints {}))
+  ([opts] (if (get opts \"strict\") [[:excludes [\"a\" true] [\"b\" true]]] [])))")
+  (write-workflow! (str tmp "/f") "plain.clj" "(ns workflows.plain)\n(defn questions [] {\"q\" {\"type\" \"noul\" \"instructions\" \"?\"}})")
+  (let [wfs (wf/load-workflows [(str tmp "/f")])]
+    (testing "constraints take the same options as questions"
+      (is (= [] (wf/constraints (wfs "ruled"))))
+      (is (= [[:excludes ["a" true] ["b" true]]] (wf/constraints (wfs "ruled") {"strict" true}))))
+    (testing "a workflow without any declares none, and that is not the same as an empty list"
+      (is (nil? (wf/constraints (wfs "plain"))))
+      (is (nil? (wf/constraints (wfs "plain") {"x" 1})))))
+  (jolt.host/delete-tree! tmp))

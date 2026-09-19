@@ -7,6 +7,7 @@
     laya.tokenizer-test
     laya.sequence-test
     laya.json-test
+    laya.constraints-test
     workflows.email-test
     workflows.presets-test
     laya.lang-test

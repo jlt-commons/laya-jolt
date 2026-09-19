@@ -9,6 +9,8 @@
                                              ; the caller's options map
     (defn state [input] ...)                 ; optional: raw input -> model state
                                              ; (without it the input is the state)
+    (defn constraints ([] ...) ([opts] ...)) ; optional: laya.constraints over the
+                                             ; question ids, same arities as questions
 
   The `questions` docstring is the workflow's description. The bundled ones
   live in ./workflows (email, demo); users add theirs under
@@ -49,13 +51,16 @@
           qv (or (ns-resolve n 'questions)
                  (fail path (str "defines no `questions` fn in " ns-sym) {:ns ns-sym}))
           sv (ns-resolve n 'state)
-          arglists (:arglists (meta qv))]
+          cv (ns-resolve n 'constraints)
+          takes-options? (fn [v] (boolean (some #(= 1 (count %)) (:arglists (meta v)))))]
       {:name name
        :ns ns-sym
        :file path
        :questions @qv
        :state (when sv @sv)
-       :options? (boolean (some #(= 1 (count %)) arglists))
+       :constraints (when cv @cv)
+       :options? (takes-options? qv)
+       :constraints-options? (when cv (takes-options? cv))
        :doc (:doc (meta qv))})))
 
 (defn load-workflows
@@ -83,3 +88,12 @@
   workflow has no `state` fn."
   [wf input]
   (if-let [f (:state wf)] (f input) input))
+
+(defn constraints
+  "The workflow's constraint list (with the caller's options when its
+  `constraints` takes them), or nil when it declares none: nil means the
+  answers stay plain, [] still runs the decoder."
+  ([wf] (constraints wf {}))
+  ([wf opts]
+   (when-let [f (:constraints wf)]
+     (if (and (seq opts) (:constraints-options? wf)) (f opts) (f)))))

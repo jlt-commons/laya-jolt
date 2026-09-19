@@ -253,8 +253,10 @@
 
 (defn predict
   "Route, then answer every question in one forward pass on the chosen
-  checkpoint: the system-one map plus a \"routing\" key with the decision."
-  [router state questions & {:keys [model task lang]}]
+  checkpoint: the system-one map plus a \"routing\" key with the decision.
+  :constraints / :on-infeasible go to agent/system-one."
+  [router state questions & {:keys [model task lang constraints on-infeasible]}]
   (let [d (route router state questions :model model :task task :lang lang)
         agent (load-model router (get d "model"))]
-    (assoc (ag/system-one agent state questions) "routing" d)))
+    (assoc (ag/system-one agent state questions {:constraints constraints :on-infeasible on-infeasible})
+           "routing" d)))

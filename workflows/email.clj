@@ -5,7 +5,8 @@
 
   As a workflow (laya.workflows): `questions` is email-questions, `state`
   takes {\"subject\" \"body\" \"from\"} (string keys, as the HTTP API
-  receives them) and runs email-state on it. Options: {\"categories\"
+  receives them) and runs email-state on it, and `constraints` ties
+  needs_reply to is_spam / is_phishing. Options: {\"categories\"
   {key description}} for your own routing labels.
 
   Jev-style models lose accuracy on long, noisy state, and the model reads
@@ -255,3 +256,11 @@
                  :clean (get input "clean" true)
                  :extra (dissoc input "subject" "body" "from" "clean"))
     (email-state nil (str input))))
+
+(defn constraints
+  "Nobody replies to spam or phishing: the decided needs_reply follows
+  is_spam / is_phishing (laya.constraints), whatever each question's own
+  probability says."
+  []
+  [[:implies ["is_spam" true] ["needs_reply" false]]
+   [:implies ["is_phishing" true] ["needs_reply" false]]])

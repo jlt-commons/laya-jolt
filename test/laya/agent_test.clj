@@ -184,3 +184,62 @@
     (testing "nonsense is refused"
       (doseq [bad [{:max-len 0} {:max-len "big"} {:head-max-len 512 :max-len 512} {:head-max-len 4}]]
         (is (thrown? Exception (ag/with-limits base bad)) (pr-str bad))))))
+
+(deftest constraints-decide-the-questions-jointly
+  ;; department: billing (0.9+); urgency 1.51 = level 1 or 2; churn_risk
+  ;; 0.4312; is_phishing 0.0312 (system-one-matches-readme)
+  (let [plain (ag/system-one @agent state questions)]
+    (testing "no constraints, no change: the 4-arity with nil is the 3-arity"
+      (is (= (seq/json-str plain) (seq/json-str (ag/system-one @agent state questions nil))))
+      (is (= (seq/json-str plain) (seq/json-str (ag/system-one @agent state questions {})))))
+    (testing "an empty constraint list still decides: every answer gets `decided` = its own argmax"
+      (let [out (ag/system-one @agent state questions {:constraints []})
+            a (get out "answers")]
+        (is (= ["model" "answers" "usage" "constraints"] (keys out)))
+        (is (= ["type" "choice" "decided" "probabilities" "confidence" "action"] (keys (get a "department"))))
+        (is (= ["type" "score" "decided" "legend" "probabilities" "confidence" "action"] (keys (get a "urgency"))))
+        (is (= ["type" "noul" "decided" "confidence" "action"] (keys (get a "churn_risk"))))
+        (is (= "billing" (get-in a ["department" "decided"])))
+        (is (= 2 (get-in a ["urgency" "decided"])) "the most probable level, an index into the legend")
+        (is (false? (get-in a ["churn_risk" "decided"])))
+        (is (false? (get-in a ["is_phishing" "decided"])))
+        (is (= (seq/ordered-map [["feasible" true] ["decoder" "independent"] ["exact" true] ["violations" []]])
+               (get out "constraints")))
+        (is (= (seq/json-str plain)
+               (seq/json-str (-> out (dissoc "constraints")
+                                 (update "answers" (fn [as] (seq/ordered-map (map (fn [[k v]] [k (dissoc v "decided")]) as)))))))
+            "everything else is byte-identical")))
+    (testing "a constraint moves `decided`, never the model's own answer"
+      (let [out (ag/system-one @agent state questions
+                               {:constraints [["implies" ["department" "billing"] ["churn_risk" true]]
+                                              ["max-level" "urgency" 1]]})
+            a (get out "answers")]
+        (is (= "billing" (get-in a ["department" "choice"])))
+        (is (= "billing" (get-in a ["department" "decided"])) "0.9 vs 0.43: cheaper to flip churn_risk")
+        (is (true? (get-in a ["churn_risk" "decided"])))
+        (is (= 0.4312 (get-in a ["churn_risk" "noul"])) "the calibrated probability is untouched")
+        (is (= 1 (get-in a ["urgency" "decided"])))
+        (is (= 1.51 (get-in a ["urgency" "score"])))
+        (is (= "exact" (get-in out ["constraints" "decoder"])))
+        (is (true? (get-in out ["constraints" "feasible"])))))
+    (testing "infeasible: the fewest violations, reported in canonical form"
+      (let [out (ag/system-one @agent state questions
+                               {:constraints [[:all-of ["churn_risk" "true"] ["churn_risk" false]]]})]
+        (is (false? (get-in out ["constraints" "feasible"])))
+        (is (= "min_violations" (get-in out ["constraints" "decoder"])))
+        (is (= [["all-of" ["churn_risk" true] ["churn_risk" false]]] (get-in out ["constraints" "violations"])))
+        (is (false? (get-in out ["answers" "churn_risk" "decided"])) "the model's own argmax, nothing better")))
+    (testing "or raise, with the violations"
+      (let [e (try (ag/system-one @agent state questions
+                                  {:constraints [["all-of" ["churn_risk" true] ["churn_risk" false]]]
+                                   :on-infeasible "raise"})
+                   nil (catch Exception e e))]
+        (is (= :infeasible (:type (ex-data e))))
+        (is (= [["all-of" ["churn_risk" true] ["churn_risk" false]]] (:violations (ex-data e))))))
+    (testing "a bad constraint is refused before any inference"
+      (let [e (try (ag/system-one @agent state questions {:constraints [["implies" ["department" "legal"] ["churn_risk" true]]]})
+                   nil (catch Exception e e))]
+        (is (= :invalid-constraint (:type (ex-data e))))
+        (is (= 0 (:index (ex-data e))))
+        (is (re-find #"\"legal\" is not an option of \"department\"" (ex-message e))))
+      (is (thrown-with-msg? Exception #"list" (ag/system-one @agent state questions {:constraints {"a" 1}}))))))

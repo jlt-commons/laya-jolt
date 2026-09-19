@@ -3,6 +3,7 @@
   Mirrors laya 0.3.0 agent.py (temperature calibration, entropy confidence,
   the `action` extension)."
   (:require [clojure.edn :as edn]
+            [laya.constraints :as c]
             [laya.model :as m]
             [laya.sequence :as seq]
             [laya.tokenizer :as tk]))
@@ -109,36 +110,67 @@
 
 (defn- key-str [k] (if (keyword? k) (name k) (str k)))
 
-(defn- answer-for [q p k actp]
-  (let [ext (array-map "act_probability" (round4 actp))]
-    (case (:t q)
-      "choice"
-      (let [ks (mapv key-str (keys (:crit q)))]
-        (array-map "type" "choice"
-                   "choice" (nth ks (argmax p))
-                   "probabilities" (seq/ordered-map (map-indexed (fn [i c] [c (round4 (nth p i))]) ks))
-                   "confidence" (round4 (confidence-from-probs p k))
-                   "action" ext))
-      "score"
-      (array-map "type" "score"
-                 "score" (round4 (reduce + (map-indexed (fn [i pi] (* i pi)) p)))
-                 "legend" (seq/ordered-map (map-indexed (fn [i c] [(str i) c]) (:crit q)))
-                 "probabilities" (seq/ordered-map (map-indexed (fn [i pi] [(str i) (round4 pi)]) p))
-                 "confidence" (round4 (confidence-from-probs p k))
-                 "action" ext)
-      (let [p1 (double (nth p 1))]
-        (array-map "type" "noul"
-                   "noul" (round4 p1)
-                   "confidence" (round4 (max p1 (- 1.0 p1)))
-                   "action" ext)))))
+(defn- answer-for
+  "One typed answer. With a decision (`decided`, the label the constrained
+  decoder settled on) it follows the model's own answer field; without,
+  the map is laya 0.3.0's exactly."
+  [q p k actp decided]
+  (let [ext (array-map "act_probability" (round4 actp))
+        decided-kv (when (some? decided) [["decided" decided]])]
+    (seq/ordered-map
+     (case (:t q)
+       "choice"
+       (let [ks (mapv key-str (keys (:crit q)))]
+         (concat [["type" "choice"] ["choice" (nth ks (argmax p))]]
+                 decided-kv
+                 [["probabilities" (seq/ordered-map (map-indexed (fn [i c] [c (round4 (nth p i))]) ks))]
+                  ["confidence" (round4 (confidence-from-probs p k))]
+                  ["action" ext]]))
+       "score"
+       (concat [["type" "score"] ["score" (round4 (reduce + (map-indexed (fn [i pi] (* i pi)) p)))]]
+               decided-kv
+               [["legend" (seq/ordered-map (map-indexed (fn [i c] [(str i) c]) (:crit q)))]
+                ["probabilities" (seq/ordered-map (map-indexed (fn [i pi] [(str i) (round4 pi)]) p))]
+                ["confidence" (round4 (confidence-from-probs p k))]
+                ["action" ext]])
+       (let [p1 (double (nth p 1))]
+         (concat [["type" "noul"] ["noul" (round4 p1)]]
+                 decided-kv
+                 [["confidence" (round4 (max p1 (- 1.0 p1)))]
+                  ["action" ext]]))))))
+
+(defn- label-probs
+  "p in the constraint schema's label order: a noul's options are rendered
+  false first (\"noul\" is p[1]), its constraint labels are [true false]."
+  [q p]
+  (if (= "noul" (:t q)) [(nth p 1) (nth p 0)] p))
+
+(defn- constraints-report [nodes sol]
+  (seq/ordered-map [["feasible" (:feasible sol)]
+                    ["decoder" (:decoder sol)]
+                    ["exact" (:exact sol)]
+                    ["violations" (mapv #(c/canonical (nth nodes %)) (:violations sol))]]))
 
 (defn system-one
-  "state + {qid -> qdef} -> Jev answer map (ordered to match json.dumps)."
-  [agent state questions]
+  "state + {qid -> qdef} -> Jev answer map (ordered to match json.dumps).
+
+  opts (all optional): :constraints, a list of laya.constraints over the
+  question ids, decided jointly after the forward pass. When it is given
+  (even empty) every answer carries `decided` (choice: the option; score:
+  the level index; noul: the boolean) after its own answer field, and the
+  result a `constraints` report {feasible decoder exact violations}; the
+  model's own fields never change. :on-infeasible `min_violations`
+  (default: the fewest violated constraints, then the best score) or
+  `raise` (ex-info {:type :infeasible :violations [...]}). A bad
+  constraint is ex-info {:type :invalid-constraint :index i}, thrown
+  before any inference."
+  ([agent state questions] (system-one agent state questions nil))
+  ([agent state questions {:keys [constraints on-infeasible]}]
   (let [{:keys [cfg tok w]} agent
         qids (vec (keys questions))
         prepared (mapv (fn [qid]
-                         (let [q (to-internal (validate-question qid (get questions qid)))
+                         (let [qdef (validate-question qid (get questions qid))
+                               q (to-internal qdef)
                                [ids markers] (seq/build-sequence tok state q
                                                                  (:max-len cfg)
                                                                  (:head-max-len cfg))]
@@ -147,8 +179,13 @@
                                                      (pr-str qid) (:head-max-len cfg))
                                              {:type :invalid-question :qid qid :field "criteria"
                                               :head-max-len (:head-max-len cfg)})))
-                           {:qid qid :q q :ids ids :markers markers :qtype (seq/qtypes (:t q))}))
+                           {:qid qid :qdef qdef :q q :ids ids :markers markers :qtype (seq/qtypes (:t q))}))
                        qids)
+        ;; the constraints are checked against the questions before the
+        ;; forward pass, so a bad one costs nothing
+        schema (when (some? constraints)
+                 (c/schema (map (fn [{:keys [qid qdef]}] [(key-str qid) qdef]) prepared)))
+        nodes (when schema (c/parse schema constraints))
         n-tokens (reduce + (map #(count (:ids %)) prepared))
         ;; the questions share every gemm of the forward, in batches of at
         ;; most max-batch rows so the workspace stays a few hundred MB
@@ -160,18 +197,37 @@
                                                     :qtype qtype})
                                                  chunk)))
                         (partition-all max-batch prepared))
+        calibrated (mapv (fn [{:keys [qtype markers]} [logits act]]
+                           (let [k (count markers)
+                                 ;; max(1e-3, t_scale): a degenerate fitted temperature
+                                 ;; saturates the softmax instead of dividing by zero
+                                 temp (max 1e-3 (double (get (:temperature-by-options cfg)
+                                                             (seq/temp-bucket qtype k)
+                                                             (nth (:temperature cfg) qtype))))]
+                             {:k k
+                              :p (softmax (mapv #(/ (double %) temp) (take k logits)))
+                              :actp (first (softmax act))}))
+                         prepared outputs)
+        solution (when nodes
+                   (let [sol (c/decode schema
+                                       (into {} (map (fn [{:keys [qid q]} {:keys [p]}] [(key-str qid) (label-probs q p)])
+                                                     prepared calibrated))
+                                       nodes {})]
+                     (when (and (not (:feasible sol)) (= "raise" (some-> on-infeasible name)))
+                       (throw (ex-info "no assignment satisfies the constraints"
+                                       {:type :infeasible
+                                        :violations (mapv #(c/canonical (nth nodes %)) (:violations sol))})))
+                     sol))
+        decided-label (fn [qid]
+                        (when solution
+                          (let [q (key-str qid)]
+                            (nth (get-in schema [q :labels]) (get-in solution [:assignment q])))))
         answers (seq/ordered-map
-                 (map (fn [{:keys [qid q markers qtype]} [logits act]]
-                        (let [k (count markers)
-                              ;; max(1e-3, t_scale): a degenerate fitted temperature
-                              ;; saturates the softmax instead of dividing by zero
-                              temp (max 1e-3 (double (get (:temperature-by-options cfg)
-                                                          (seq/temp-bucket qtype k)
-                                                          (nth (:temperature cfg) qtype))))
-                              p (softmax (mapv #(/ (double %) temp) (take k logits)))
-                              actp (first (softmax act))]
-                          [qid (answer-for q p k actp)]))
-                      prepared outputs))]
-    (array-map "model" "laya-rl-agent"
-               "answers" answers
-               "usage" (array-map "input_tokens" n-tokens "output_tokens" 0))))
+                 (map (fn [{:keys [qid q]} {:keys [k p actp]}]
+                        [qid (answer-for q p k actp (decided-label qid))])
+                      prepared calibrated))]
+    (seq/ordered-map
+     (concat [["model" "laya-rl-agent"]
+              ["answers" answers]
+              ["usage" (array-map "input_tokens" n-tokens "output_tokens" 0)]]
+             (when solution [["constraints" (constraints-report nodes solution)]]))))))

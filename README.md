@@ -258,11 +258,47 @@ model input. Run it:
 jolt -M:run --list                                          # what is loaded, from where
 jolt -M:run refund-risk '{"text": "Charged twice, want my money back"}'
 jolt -M:run refund-risk @ticket.json --options '{"teams": {"billing": "money", "fraud": "chargebacks"}}'
+jolt -M:run refund-risk @ticket.json --constraints '[["implies", ["wants_refund", true], ["team", "billing"]]]'
 LAYA_WORKFLOWS=./my-workflows jolt -M:run refund-risk @ticket.json   # only that directory
 ```
 
-Bundled, all byte-identical to the Python package's presets
-(`golden/presets.edn`):
+### Constraints
+
+The model answers each question on its own. A workflow (or a request) can
+tie them with constraints, decided jointly after the forward pass
+(`laya.constraints`, the port of GLiNER2's constrained classification):
+
+```clojure
+(defn constraints                                    ; optional; same arities as questions
+  []
+  [[:implies ["wants_refund" true] ["team" "billing"]]
+   [:at-most 1 ["tone" 2] ["team" "support"]]
+   [:min-level "tone" 1]])
+```
+
+A ref `[question label]` names a choice option, a score level (index or
+legend text) or a noul boolean; operators are `not`, `all-of`, `any-of`,
+`implies`, `iff`, `excludes`, `exactly-one-of`, `at-least k`, `at-most k`,
+`exactly k` (over refs or nested constraints) and, for score questions,
+`at-level`, `min-level`, `max-level`, `between-level`. Written as strings,
+keywords, dashes or underscores; JSON requests use the same shape.
+
+The decision maximises the joint probability (the sum of the calibrated
+log probabilities) subject to the constraints: independent when nothing
+couples two questions, else exact search with branch and bound (beam
+search past a node budget). When constraints are given, even an empty
+list, every answer carries `decided` next to its own field (choice: the
+option, score: the level index, noul: the boolean) and the result a
+`constraints` report `{"feasible", "decoder", "exact", "violations"}`;
+the model's own `choice`, `score`, `noul` and `probabilities` never
+change. A contradictory set falls to the assignment with the fewest
+violated constraints (listed in `violations`), or fails when
+`on_infeasible` is `raise`. The bundled `email` workflow ties `needs_reply`
+to `is_spam` and `is_phishing`.
+
+Bundled, their questions byte-identical to the Python package's presets
+(`golden/presets.edn`); `email` adds constraints the Python package has no
+equivalent of:
 
 | workflow | input | asks |
 |---|---|---|
@@ -281,16 +317,20 @@ and adds the Python package's `Router` and presets. Routes are dispatched by
 
 ```
 POST /v1/systemone        Authorization: Bearer <key>   (only if a key is configured)
-{"state": <string|object|array>, "questions": {"<id>": {...}}, "model"?: ..., "lang"?: ..., "task"?: ...}
+{"state": <string|object|array>, "questions": {"<id>": {...}}, "constraints"?: [...], "on_infeasible"?: "min_violations"|"raise",
+ "model"?: ..., "lang"?: ..., "task"?: ...}
 -> {"model": "laya-rl-agent", "answers": {"<id>": {...}}, "usage": {"input_tokens": n, "output_tokens": 0},
+    "constraints"?: {"feasible": bool, "decoder": ..., "exact": bool, "violations": [...]},
     "routing": {"model": "english", "repo": "convaiinnovations/laya", "reason": "English Latin text",
                 "detection": {...}, "workflow": null}}
 
 POST /v1/route            same body, questions optional -> the routing decision alone (nothing loaded or run)
-POST /v1/workflows/<name> {"input": <anything the workflow's state fn takes>, "options"?: {...}, "model"?/"lang"?/"task"?}
-                          -> the systemone answer + "workflow" + the built "state"
+POST /v1/workflows/<name> {"input": <anything the workflow's state fn takes>, "options"?: {...}, "constraints"?: [...],
+                           "on_infeasible"?: ..., "model"?/"lang"?/"task"?}
+                          -> the systemone answer + "workflow" + the built "state"; the request's constraints
+                             are added to the workflow's own
 GET  /v1/models           -> {"default": ..., "max_loaded": n, "models": {"english": {"repo", "data", "available", "loaded"}, ...}}
-GET  /v1/workflows        -> {"workflows": {"email": {"description", "file", "questions": [ids], "options": bool}, ...}}
+GET  /v1/workflows        -> {"workflows": {"email": {"description", "file", "questions": [ids], "constraints": [...], "options": bool}, ...}}
 GET  /health              -> {"status": "ok", "model": "laya-rl-agent", "loaded": [...], "workflows": [...]}
 ```
 
@@ -306,7 +346,10 @@ script/language > default. Every answer says what was chosen and why under
 `{"detail": [{"loc": ["body", "questions", "<id>", "criteria"], "msg": ..., "type": ...}]}`
 for anything wrong with the body (malformed JSON, missing state or
 questions, unknown type or model, criteria that don't fit the type or the
-head), `404` for unknown routes and workflows, `405` for the wrong method,
+head, a constraint that names no question or label — at
+`["body", "constraints", i]` — or, with `on_infeasible: raise`, a set
+nothing satisfies: type `infeasible`, with the `violations`), `404` for
+unknown routes and workflows, `405` for the wrong method,
 `503` when the chosen checkpoint has no prepared data, `413` past
 `:max-request-bytes` (4 MiB). Inference and checkpoint loading are
 serialized on one lock; the adapter's workers overlap only on I/O.

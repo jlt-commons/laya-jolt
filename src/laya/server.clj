@@ -4,12 +4,15 @@
   Router and presets offer:
 
     POST /v1/systemone        {\"state\" ..., \"questions\" {...},
+                               \"constraints\"? [...], \"on_infeasible\"?,
                                \"model\"? \"lang\"? \"task\"?}
                               -> {\"model\" \"laya-rl-agent\", \"answers\" {...},
-                                  \"usage\" {...}, \"routing\" {...}}
+                                  \"usage\" {...}, \"constraints\"? {...},
+                                  \"routing\" {...}}
     POST /v1/route            same body, questions optional -> the routing
                               decision alone, nothing loaded or run
     POST /v1/workflows/:name  {\"input\" ..., \"options\"? {...},
+                               \"constraints\"? [...], \"on_infeasible\"?,
                                \"model\"? \"lang\"? \"task\"?}
                               -> systemone answer + \"workflow\" + the built \"state\"
     GET  /v1/models           the checkpoints: repo, data dir, prepared, loaded
@@ -20,7 +23,12 @@
   `model` is absent (or the engine's own name, laya-rl-agent) to route by
   content, or a checkpoint name / alias (english, multilingual,
   typed-decisions, en, ml, ...) to pick one; `lang` and `task` are the
-  Router's other hints. Anything else is a 422. Routes are dispatched by
+  Router's other hints. `constraints` is a list of laya.constraints over
+  the question ids (a workflow's own come first, the request's are added),
+  decided jointly after the forward pass: every answer then carries
+  `decided` and the body a `constraints` report; `on_infeasible` is
+  min_violations (default) or raise (a 422 of type infeasible listing the
+  violated constraints). Anything else is a 422. Routes are dispatched by
   ruuter.
 
   Auth is `Authorization: Bearer <key>` on /v1/* when the server is started
@@ -89,6 +97,11 @@
       :invalid-question (unprocessable [(detail (question-loc data) (ex-message e) "value_error")])
       :unknown-model (unprocessable [(detail ["body" "model"] (ex-message e) "value_error")])
       :invalid-request (unprocessable [(detail ["body" (or (:field data) "options")] (ex-message e) "value_error")])
+      :invalid-constraint (unprocessable [(detail (cond-> ["body" "constraints"]
+                                                    (:index data) (conj (- (:index data) (:offset data 0))))
+                                                  (ex-message e) "value_error")])
+      :infeasible (unprocessable [(assoc (detail ["body" "constraints"] (ex-message e) "infeasible")
+                                         "violations" (:violations data))])
       :model-unavailable (json-response 503 {"detail" (ex-message e)})
       (throw e))))
 
@@ -121,6 +134,19 @@
             (catch Exception e
               [(detail ["body" "model"] (ex-message e) "value_error")]))))))
 
+(def ^:private infeasible-modes #{"min_violations" "raise"})
+
+(defn- check-constraints
+  "constraints, when present, is a list (each entry is checked against the
+  questions by the library, before any inference); on_infeasible one of
+  the two modes."
+  [body]
+  (concat
+   (when (and (contains? body "constraints") (not (sequential? (get body "constraints"))))
+     [(detail ["body" "constraints"] "constraints must be a list of constraints" "type_error")])
+   (when (and (contains? body "on_infeasible") (not (contains? infeasible-modes (get body "on_infeasible"))))
+     [(detail ["body" "on_infeasible"] "on_infeasible must be min_violations or raise" "value_error")])))
+
 (defn- check-state [body]
   (let [state (get body "state")]
     (when-not (or (string? state) (map? state) (sequential? state))
@@ -145,15 +171,32 @@
     [(detail ["body"] "request body must be a JSON object" "type_error")]
     (vec (concat (check-state body)
                  (check-routing-fields body)
+                 (check-constraints body)
                  (check-questions (get body "questions"))))))
 
 (defn- routing-opts
-  "The Router hints in a body: :model (nil for the engine's own name), :lang, :task."
+  "The Router hints in a body: :model (nil for the engine's own name),
+  :lang, :task, plus :constraints / :on-infeasible for the decoder."
   [body]
   (let [m (get body "model")]
     {:model (when-not (engine-names m) m)
      :lang (get body "lang")
-     :task (get body "task")}))
+     :task (get body "task")
+     :constraints (get body "constraints")
+     :on-infeasible (get body "on_infeasible")}))
+
+(defn- predict
+  "router/predict under the inference lock, with the errors the decoder
+  throws pointed at the request: a bad constraint at its index among the
+  request's own (`offset` of them belong to the workflow)."
+  [rt lock state questions {:keys [model lang task constraints on-infeasible]} offset]
+  (try (locking lock
+         (router/predict rt state questions :model model :lang lang :task task
+                         :constraints constraints :on-infeasible on-infeasible))
+       (catch Exception e
+         (if (= :invalid-constraint (:type (ex-data e)))
+           (throw (ex-info (ex-message e) (assoc (ex-data e) :offset offset)))
+           (throw e)))))
 
 ;; --- endpoints ---------------------------------------------------------------------
 
@@ -164,11 +207,7 @@
   (let [details (check-request body)]
     (if (seq details)
       (unprocessable details)
-      (let [{:keys [model lang task]} (routing-opts body)
-            result (locking lock
-                     (router/predict rt (get body "state") (get body "questions")
-                                     :model model :lang lang :task task))]
-        (json-response 200 result)))))
+      (json-response 200 (predict rt lock (get body "state") (get body "questions") (routing-opts body) 0)))))
 
 (defn route-only
   "POST /v1/route: the decision for a body, without loading or running."
@@ -203,7 +242,7 @@
       (unprocessable [(detail ["body" "options"] "options must be an object" "type_error")])
 
       :else
-      (let [details (check-routing-fields body)]
+      (let [details (concat (check-routing-fields body) (check-constraints body))]
         (if (seq details)
           (unprocessable details)
           (let [state (wf/state w (get body "input"))
@@ -211,9 +250,14 @@
                 details (concat (check-state {"state" state}) (check-questions questions))]
             (if (seq details)
               (unprocessable details)
-              (let [{:keys [model lang task]} (routing-opts body)
-                    result (locking lock
-                             (router/predict rt state questions :model model :lang lang :task task))]
+              ;; the workflow's constraints first, then the request's; a
+              ;; workflow that declares none leaves the answers plain
+              ;; unless the request brings some
+              (let [own (wf/constraints w (get body "options" {}))
+                    theirs (get body "constraints")
+                    opts (assoc (routing-opts body)
+                                :constraints (when (or own theirs) (vec (concat own theirs))))
+                    result (predict rt lock state questions opts (count own))]
                 (json-response 200 (assoc result "workflow" name "state" state))))))))))
 
 (defn- health [rt workflows]
@@ -244,6 +288,7 @@
                                                  ["file" (:file w)]
                                                  ["questions" (vec (map #(if (keyword? %) (clojure.core/name %) (str %))
                                                                         (keys (wf/questions w))))]
+                                                 ["constraints" (vec (wf/constraints w))]
                                                  ["options" (:options? w)]])]))}))
 
 ;; --- the handler --------------------------------------------------------------------
