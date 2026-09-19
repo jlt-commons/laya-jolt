@@ -1,0 +1,37 @@
+name: test
+
+# Run the parity suites against golden/ on every push and PR, on both platforms
+# the binary ships for. The checkpoint comes from the Hub (cached by revision);
+# see .github/actions/setup.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-macos
+          - os: ubuntu-latest
+            target: x86_64-linux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+        with:
+          target: ${{ matrix.target }}
+          jolt-pin: ${{ vars.JOLT_PIN }}
+
+      - name: Test
+        run: jolt -M:test

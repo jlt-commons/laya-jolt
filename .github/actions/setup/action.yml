@@ -1,0 +1,101 @@
+name: setup
+description: >
+  Everything a job needs before it can run the suite or build the binary:
+  system libs, the jolt compiler, the C kernels, the Laya checkpoint and the
+  prepared data/ directory.
+
+inputs:
+  target:
+    description: jolt release asset target (aarch64-macos or x86_64-linux)
+    required: true
+  laya-revision:
+    # The golden traces and the CRCs in golden/prepare.edn were dumped from this
+    # revision of convaiinnovations/laya. The suite pins to it, not to main: a
+    # newer upload would change the checksums and every parity test with them.
+    description: convaiinnovations/laya git revision to fetch
+    default: 7c76b622dfc5cac71b2dc1c29873efe2ce509a05
+  jolt-pin:
+    description: jolt release tag to use instead of the latest one
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    # The tokenizer dlopens ICU and the matmul dlopens OpenBLAS at runtime
+    # (see :jolt/native in deps.edn). macOS has both in the system: libicucore
+    # and the Accelerate framework. The -dev packages also install the
+    # unversioned .so symlinks, which are the last fallback in deps.edn, so
+    # this keeps working when ubuntu-latest moves to a newer ICU.
+    - name: System deps (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends libicu-dev libopenblas-dev
+
+    # Latest release by default; the JOLT_PIN repository variable overrides
+    # without a commit. Echoed so the log records which compiler built what.
+    - name: Resolve jolt version
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        JOLT_PIN: ${{ inputs.jolt-pin }}
+      run: |
+        if [ -n "$JOLT_PIN" ]; then
+          ver="$JOLT_PIN"
+          echo "jolt: PINNED to $ver via the JOLT_PIN repository variable"
+        else
+          ver=$(gh api repos/jolt-lang/jolt/releases/latest --jq .tag_name)
+          [ -n "$ver" ] && [ "$ver" != "null" ] || { echo "could not resolve latest jolt"; exit 1; }
+          echo "jolt: latest release is $ver"
+        fi
+        echo "JOLT_VERSION=$ver" >> "$GITHUB_ENV"
+
+    - name: Install jolt
+      shell: bash
+      run: |
+        url="https://github.com/jolt-lang/jolt/releases/download/${JOLT_VERSION}/jolt-${JOLT_VERSION}-${{ inputs.target }}.tar.gz"
+        curl -fsSL -o jolt.tar.gz "$url"
+        mkdir -p "$HOME/.jolt-dist"
+        tar xzf jolt.tar.gz -C "$HOME/.jolt-dist" --strip-components=1
+        rm jolt.tar.gz
+        echo "$HOME/.jolt-dist" >> "$GITHUB_PATH"
+
+    - name: jolt version
+      shell: bash
+      run: jolt --version
+
+    - name: Build kernels
+      shell: bash
+      run: jolt kernels
+
+    # 800 MB from the Hub. The cache key is the revision, so a bump above
+    # refetches once and every OS shares the one entry (the files are the same
+    # bytes everywhere).
+    - name: Cache the Laya checkpoint
+      id: checkpoint
+      uses: actions/cache@v4
+      with:
+        path: ~/laya
+        key: laya-checkpoint-${{ inputs.laya-revision }}
+
+    - name: Fetch the Laya checkpoint
+      if: steps.checkpoint.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        REV: ${{ inputs.laya-revision }}
+        # sha256 of model.safetensors at that revision (its LFS blob id).
+        SHA256: 891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c
+      run: |
+        base="https://huggingface.co/convaiinnovations/laya/resolve/${REV}"
+        mkdir -p "$HOME/laya/tokenizer" "$HOME/laya/encoder"
+        for f in model.safetensors tokenizer/tokenizer.json encoder/config.json rl_agent_config.json; do
+          curl -fsSL --retry 3 -o "$HOME/laya/$f" "$base/$f"
+        done
+        echo "$SHA256  $HOME/laya/model.safetensors" | shasum -a 256 -c -
+
+    - name: Prepare data/
+      shell: bash
+      run: |
+        echo "LAYA_HOME=$HOME/laya" >> "$GITHUB_ENV"
+        LAYA_HOME="$HOME/laya" jolt prepare

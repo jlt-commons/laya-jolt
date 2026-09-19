@@ -105,6 +105,11 @@ adapter.
 ./laya-server --self-test --data data --golden golden
 ```
 
+Tagged releases (`v*`) carry this binary prebuilt for macOS arm64 and Linux
+x86_64, built and self-tested by `.github/workflows/release.yml`. CI runs the
+suite on both platforms on every push, fetching the checkpoint from the Hub at
+the revision `golden/` was dumped from (`.github/actions/setup`).
+
 ## Native dependencies
 
 Both platforms are supported; `deps.edn` carries darwin and linux entries and

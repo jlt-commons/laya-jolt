@@ -1,0 +1,88 @@
+name: release
+
+# Build the standalone laya-server for macOS (arm64) and Linux (x86_64) and
+# attach both to the GitHub Release when a v* tag is pushed. workflow_dispatch
+# builds the same binaries as workflow artifacts without publishing a release.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write   # create the release and upload assets
+
+# The compiler version is resolved at build time (see the setup action), not
+# pinned here: a release should ship a binary built by the current compiler. What
+# makes that safe is ORDER: the suite and the binary's own --self-test run before
+# the publish step, so a jolt release that cannot build this tree, or builds it
+# wrong, fails the job and uploads nothing. The tag survives and the run can be
+# retried. To pin during an incident, set the JOLT_PIN repository variable
+# (Settings -> Variables) to a tag like v0.8.9. No workflow edit, no commit.
+#
+# The self-test matters more here than in most projects: jolt 0.8.9's release
+# build miscompiles one pattern the tokenizer uses (see README, "As a binary"),
+# and the interpreted suite cannot see that. `jolt binary` builds and then runs
+# ./laya-server --self-test against golden/, so a bad binary never ships.
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-macos
+          - os: ubuntu-latest
+            target: x86_64-linux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+        with:
+          target: ${{ matrix.target }}
+          jolt-pin: ${{ vars.JOLT_PIN }}
+
+      - name: Test
+        run: jolt -M:test
+
+      - name: Build and self-test the binary
+        run: jolt binary
+
+      - name: Package
+        # Name from the REF, not the event: a workflow_dispatch on a tag is still
+        # that tag's release. Only an untagged build gets the bare name. golden/
+        # rides along so a user can run --self-test against their own data/.
+        run: |
+          case "${GITHUB_REF}" in
+            refs/tags/*) name="laya-server-${GITHUB_REF_NAME}-${{ matrix.target }}" ;;
+            *)           name="laya-server-${{ matrix.target }}" ;;
+          esac
+          mkdir -p "$name"
+          cp -r laya-server README.md LICENSE golden "$name/"
+          tar czf "${name}.tar.gz" "$name"
+          echo "PKG=${name}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Publish to release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "laya-jolt ${GITHUB_REF_NAME}" \
+            --verify-tag \
+            --notes "Standalone \`laya-server\` for macOS (arm64) and Linux (x86_64), self-tested against \`golden/\`.
+
+          The binary does not carry the weights. Convert the \`convaiinnovations/laya\` checkpoint once with \`jolt prepare\` (revision \`7c76b62\`, the one the golden traces were dumped from), then run \`./laya-server --data data --port 8080\`. \`./laya-server --self-test --data data --golden golden\` checks the pair.
+
+          Runtime deps on Linux: ICU and OpenBLAS (\`apt install libicu-dev libopenblas-dev\`, or the runtime packages for your release). macOS uses the system ICU and Accelerate.
+          The macOS binary is unsigned; clear the quarantine flag before first run: \`xattr -d com.apple.quarantine ./laya-server\`." \
+            || echo "release already exists, uploading asset"
+          gh release upload "${GITHUB_REF_NAME}" "${PKG}" --clobber
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: laya-server-${{ matrix.target }}
+          path: laya-server
