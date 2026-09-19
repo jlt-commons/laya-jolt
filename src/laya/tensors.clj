@@ -255,6 +255,12 @@
   [t bytes]
   (ffi/segment (+ (ffi/address (:p t)) bytes)))
 
+(defn rows
+  "A view of rows [r0, r0+n) of the [m x c] tensor t: no copy, same memory."
+  [t r0 n]
+  (let [c (second (:shape t))]
+    {:p (at-offset t (* 4 r0 c)) :shape [n c] :size (* n c)}))
+
 (defn masked-softmax
   "Row softmax over the allowed keys of a [rows x cols] score block; the
   mask is the top-left [rows x cols] of `allowed` (leading dimension cols

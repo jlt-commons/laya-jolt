@@ -83,6 +83,11 @@
             (if (string? ins) ins (seq/json-str ins {:ensure-ascii true})))
      :crit crit}))
 
+(def max-batch
+  "Rows per forward-batch. Padded to the longest row, 8 rows of 512 tokens
+  take a ~260 MB workspace; more rows buy little once the gemms are wide."
+  8)
+
 (defn- round4 [x] (/ (double (Math/round (* 1e4 (double x)))) 1e4))
 
 (defn- softmax [xs]
@@ -145,19 +150,28 @@
                            {:qid qid :q q :ids ids :markers markers :qtype (seq/qtypes (:t q))}))
                        qids)
         n-tokens (reduce + (map #(count (:ids %)) prepared))
+        ;; the questions share every gemm of the forward, in batches of at
+        ;; most max-batch rows so the workspace stays a few hundred MB
+        outputs (mapcat (fn [chunk]
+                          (m/forward-batch w cfg
+                                           (mapv (fn [{:keys [ids markers qtype]}]
+                                                   {:ids ids :att (vec (repeat (count ids) 1))
+                                                    :markers markers :marker-mask (vec (repeat (count markers) 1))
+                                                    :qtype qtype})
+                                                 chunk)))
+                        (partition-all max-batch prepared))
         answers (seq/ordered-map
-                 (for [{:keys [qid q ids markers qtype]} prepared]
-                   (let [k (count markers)
-                         [logits act] (m/forward-row w cfg ids (vec (repeat (count ids) 1))
-                                                     markers (vec (repeat k 1)) qtype)
-                         ;; max(1e-3, t_scale): a degenerate fitted temperature
-                         ;; saturates the softmax instead of dividing by zero
-                         temp (max 1e-3 (double (get (:temperature-by-options cfg)
-                                                     (seq/temp-bucket qtype k)
-                                                     (nth (:temperature cfg) qtype))))
-                         p (softmax (mapv #(/ (double %) temp) (take k logits)))
-                         actp (first (softmax act))]
-                     [qid (answer-for q p k actp)])))]
+                 (map (fn [{:keys [qid q markers qtype]} [logits act]]
+                        (let [k (count markers)
+                              ;; max(1e-3, t_scale): a degenerate fitted temperature
+                              ;; saturates the softmax instead of dividing by zero
+                              temp (max 1e-3 (double (get (:temperature-by-options cfg)
+                                                          (seq/temp-bucket qtype k)
+                                                          (nth (:temperature cfg) qtype))))
+                              p (softmax (mapv #(/ (double %) temp) (take k logits)))
+                              actp (first (softmax act))]
+                          [qid (answer-for q p k actp)]))
+                      prepared outputs))]
     (array-map "model" "laya-rl-agent"
                "answers" answers
                "usage" (array-map "input_tokens" n-tokens "output_tokens" 0))))

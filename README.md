@@ -422,7 +422,17 @@ Python package on every pinned case.
 Per-forward temporaries live in an ffi arena that closes with the call, so a
 long-running process stays at the size of the loaded weights (~1.7 GB f32
 per ModernBERT-large checkpoint, 1.3 GB for mmBERT-base; the server keeps
-`--max-loaded` of them).
+`--max-loaded` of them). The questions of one call go through the encoder
+as one batch of up to 8 rows (padded to the longest, masked), sharing every
+matmul; the intermediates are one workspace per call, ~260 MB at 8 x 512.
+
+Speed, `english` on an M-series laptop, Accelerate, single call: one
+question is ~95 ms at 55 tokens and ~530 ms at 512, linear in between; the
+bundled `demo` (4 questions, ~90 tokens each) takes ~360 ms and `email` on
+a 3,000-character body (5 questions at the 512 cap) ~2.4 s. The matmuls
+are Accelerate's (multi-core); attention, the softmax, LayerNorm and the
+GELU are single-threaded C kernels, vectorized, and at 512 tokens they are
+about half of a row's time.
 
 Two known sources of last-digit drift, both one unit in the fourth decimal
 of a probability sitting on a rounding boundary: Python computes the

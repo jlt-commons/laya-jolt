@@ -127,8 +127,8 @@
         "embeddings row 0 within 1e-4 of torch")
     (doseq [i [0 1 2 27]]
       (let [out (reduce (fn [h k] (if (= k i)
-                                    (reduced (laya.model/encoder-layer! w cfg k h att0 full slid))
-                                    (laya.model/encoder-layer! w cfg k h att0 full slid)))
+                                    (reduced (laya.model/encoder-layer! w cfg k h [[full slid]]))
+                                    (laya.model/encoder-layer! w cfg k h [[full slid]])))
                         emb (range (inc i)))
             gold (read-golden-f32 (keyword (str "layer-" i)) layers)]
         (if (= i 27)
@@ -148,7 +148,7 @@
             off (* 74 1024)]
         (is (< (mx emb1 gold-emb off n-real) 1e-4) "embeddings row 1")
         (reduce (fn [h k]
-                  (let [h2 (laya.model/encoder-layer! w cfg k h att1 full1 slid1)]
+                  (let [h2 (laya.model/encoder-layer! w cfg k h [[full1 slid1]])]
                     (when (#{0 1 2 27} k)
                       (let [gold (read-golden-f32 (keyword (str "layer-" k)) layers)]
                         (if (= k 27)
@@ -174,8 +174,8 @@
         gold (fn [k shape] (t/load-file (str golden-dir "/layers/" k ".f32") shape))
         hin (let [g (gold "head-in" [2 74 1024])]
               {:p (t/ptr g) :shape [74 1024] :size (* 74 1024)})
-        h0 (laya.model/head-layer! w cfg 0 hin full)
-        h1 (laya.model/head-layer! w cfg 1 h0 full)
+        h0 (laya.model/head-layer! w cfg 0 hin [full])
+        h1 (laya.model/head-layer! w cfg 1 h0 [full])
         mx (fn [a k shape]
              (let [g (gold k shape)]
                (loop [i 0 r 0.0]
@@ -210,7 +210,7 @@
             g (gold "head-in" [2 74 1024])
             hin1 {:p (jolt.ffi/segment (+ (jolt.ffi/address (t/ptr g)) (* 74 1024 4)))
                   :shape [74 1024] :size (* 74 1024)}
-            h1 (laya.model/head-layer! w cfg 1 (laya.model/head-layer! w cfg 0 hin1 full1) full1)
+            h1 (laya.model/head-layer! w cfg 1 (laya.model/head-layer! w cfg 0 hin1 [full1]) [full1])
             gold1 (gold "head-layer-1" [2 74 1024])
             mx1 (loop [i 0 r 0.0]
                   (if (= i (* 64 1024)) r
@@ -367,23 +367,23 @@
         before (t/to-floats emb)
         full (t/allowed-mask att0 0 L -1)
         slid (t/allowed-mask att0 0 L 64)
-        ws (laya.model/workspace cfg L)
-        plain (laya.model/encoder-layer! w cfg 0 emb att0 full slid)
-        via-ws (laya.model/encoder-layer! w cfg 0 emb att0 full slid ws)
+        ws (laya.model/workspace cfg 1 L)
+        plain (laya.model/encoder-layer! w cfg 0 emb [[full slid]])
+        via-ws (laya.model/encoder-layer! w cfg 0 emb [[full slid]] ws)
         same? (fn [a b] (< (reduce max (map #(Math/abs (- (double %1) (double %2))) (t/to-floats a) (t/to-floats b))) 1e-6))]
     (is (same? plain via-ws) "a layer through the workspace matches the allocating layer")
     (is (= before (t/to-floats emb)) "the input h is not written")
     (testing "the residual stream alternates between the two workspace buffers"
-      (let [next-ws (laya.model/encoder-layer! w cfg 1 via-ws att0 full slid ws)
-            next-plain (laya.model/encoder-layer! w cfg 1 plain att0 full slid)]
+      (let [next-ws (laya.model/encoder-layer! w cfg 1 via-ws [[full slid]] ws)
+            next-plain (laya.model/encoder-layer! w cfg 1 plain [[full slid]])]
         (is (not= (jolt.ffi/address (t/ptr via-ws)) (jolt.ffi/address (t/ptr next-ws))) "layer i+1 does not overwrite its input")
         (is (same? next-plain next-ws))
         ;; layer 0 wrote into one residual buffer, layer 1 into the other; layer 2 reuses the first
         (is (= (jolt.ffi/address (t/ptr via-ws))
-               (jolt.ffi/address (t/ptr (laya.model/encoder-layer! w cfg 2 next-ws att0 full slid ws)))))))
+               (jolt.ffi/address (t/ptr (laya.model/encoder-layer! w cfg 2 next-ws [[full slid]] ws)))))))
     (testing "the head layer takes the same workspace"
-      (let [h0 (laya.model/head-layer! w cfg 0 plain full)
-            h0-ws (laya.model/head-layer! w cfg 0 plain full ws)]
+      (let [h0 (laya.model/head-layer! w cfg 0 plain [full])
+            h0-ws (laya.model/head-layer! w cfg 0 plain [full] ws)]
         (is (same? h0 h0-ws))))))
 
 ;; --- elementwise kernels vs libm / double references ------------------------
@@ -430,3 +430,46 @@
         err (fn [got want] (reduce max (map #(Math/abs (- (double %1) %2)) got want)))]
     (is (< (err got (want false)) 1e-5) "weight-only layernorm")
     (is (< (err got-b (want true)) 1e-5) "layernorm with bias")))
+
+;; --- batched forward: B padded rows through one gemm stream --------------
+
+(deftest batched-forward-equals-row-forwards
+  ;; the golden batch: row 0 has 74 real tokens, row 1 has 64 (+10 pad);
+  ;; a choice question and a noul one. Batched, the rows share every gemm
+  ;; and only attention is per row; the real tokens must come out as if
+  ;; each row ran alone, and as torch's padded batch did (golden logits).
+  (let [layers (slurp-edn (str golden-dir "/layers.edn"))
+        manifest (edn/read-string (slurp (str data-dir "/manifest.edn")))
+        cfg (edn/read-string (slurp (str data-dir "/config.edn")))
+        w (laya.model/load-weights manifest data-dir)
+        lens [74 64]
+        rows (vec (for [r [0 1]]
+                    (let [L (lens r)
+                          k (count (filter pos? (nth (layers :marker-mask) r)))]
+                      {:ids (vec (take L (map int (nth (layers :ids) r))))
+                       :att (vec (repeat L 1))
+                       :markers (vec (take k (nth (layers :marker-pos) r)))
+                       :marker-mask (vec (repeat k 1))
+                       :qtype (nth (layers :qtype) r)})))
+        alone (mapv (fn [{:keys [ids att markers marker-mask qtype]}]
+                      (laya.model/forward-row w cfg ids att markers marker-mask qtype))
+                    rows)
+        batched (laya.model/forward-batch w cfg rows)
+        gold-logits (t/load-file (str golden-dir "/layers/logits.f32") [2 4])
+        close (fn [a b tol] (every? true? (map #(< (Math/abs (- (double %1) (double %2))) tol) a b)))]
+    (is (= 2 (count batched)))
+    (doseq [r [0 1]]
+      (let [[lg act] (nth batched r)
+            [lg1 act1] (nth alone r)
+            k (count (:markers (nth rows r)))]
+        (is (= k (count lg)) (str "row " r " answers one logit per marker"))
+        (is (close lg lg1 1e-4) (str "row " r " logits: batched " lg " alone " lg1))
+        (is (close act act1 1e-4) (str "row " r " act logits: batched " act " alone " act1))
+        (is (close lg (map #(t/get (t/ptr gold-logits) (+ (* r 4) %)) (range k)) 1e-3)
+            (str "row " r " logits vs torch's padded batch"))))
+    (testing "row order and batch size do not matter"
+      (let [[[lg-b act-b]] (laya.model/forward-batch w cfg [(rows 1)])
+            swapped (laya.model/forward-batch w cfg [(rows 1) (rows 0)])]
+        (is (close lg-b (first (nth batched 1)) 1e-6))
+        (is (close (first (second swapped)) (first (nth batched 0)) 1e-6))
+        (is (close (second (first swapped)) (second (nth batched 1)) 1e-6))))))

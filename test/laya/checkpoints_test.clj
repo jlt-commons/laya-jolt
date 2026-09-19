@@ -97,8 +97,8 @@
         (is (= d (:hidden-size cfg)))
         (is (= (:num-layers layers) (:num-layers cfg)))
         (is (< (mx emb (load :embeddings) (* L d)) 1e-4))
-        (let [out (reduce (fn [h k] (laya.model/encoder-layer! w cfg k h att0 full slid)) emb (range (inc last)))
-              l0 (laya.model/encoder-layer! w cfg 0 emb att0 full slid)
+        (let [out (reduce (fn [h k] (laya.model/encoder-layer! w cfg k h [[full slid]])) emb (range (inc last)))
+              l0 (laya.model/encoder-layer! w cfg 0 emb [[full slid]])
               [rel diff scale] (tu/relative-max-abs out (load (keyword (str "layer-" last))) (* L d))]
           (is (< (mx l0 (load :layer-0) (* L d)) 1e-4) "layer 0")
           ;; same bound as tensors_test/last-layer-rel-tol
