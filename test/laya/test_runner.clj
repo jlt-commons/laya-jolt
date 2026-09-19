@@ -6,9 +6,11 @@
   '[laya.tensors-test
     laya.tokenizer-test
     laya.sequence-test
+    laya.json-test
     laya.email-test
     laya.prepare-test
-    laya.agent-test])
+    laya.agent-test
+    laya.server-test])
 
 (defn -main
   [& _]

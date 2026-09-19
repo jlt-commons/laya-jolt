@@ -49,6 +49,16 @@ generates text: state + typed questions in, calibrated typed answers out.
   by an `ffi` arena bound in `model/forward-row`, released on return.
   Weights and cached rope tables are allocated outside it.
 
+- **HTTP API mirrors TypeSafe.** `laya.server` is a ring handler (library
+  use) and a `-main` (server / `jolt build` binary) for `POST /v1/systemone`
+  with Bearer auth and FastAPI-style 422 details. Requests are read by
+  `laya.json`, which keeps object key order (option/question/state-field
+  order is model input; `data.json` cannot keep it).
+- **The AOT binary self-tests.** jolt 0.8.9 release builds miscompile
+  `(reduce (fn [acc x] (if (or (nil? acc) ...) ...)) nil xs)` (the nil? folds
+  to true). The code avoids the pattern and `jolt binary` runs
+  `./laya-server --self-test` against `golden/` after every build.
+
 ## Layout
 
 - `src/laya/` — tensors (matmul/kernels), tokenizer, model (encoder + head),
@@ -68,3 +78,4 @@ generates text: state + typed questions in, calibrated typed answers out.
 - `jolt traces` — re-dump golden traces and prepare checksums with the venv python
 - `jolt -M:test` — run the parity suites
 - `jolt -M:run` — quickstart demo from the README
+- `jolt -M:serve` — the HTTP API; `jolt binary` — standalone `./laya-server`

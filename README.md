@@ -28,6 +28,10 @@ during `prepare`, so the numerics match the torch CPU oracle exactly.
   `email-questions`.
 - `src/laya/prepare.clj` — `jolt prepare`: checkpoint -> `data/` (f32 blobs +
   EDN manifest/tokenizer/config), no Python involved.
+- `src/laya/server.clj` — the HTTP API (ring handler + `start`/`stop` +
+  `-main`), mirroring TypeSafe's `POST /v1/systemone`.
+- `src/laya/json.clj` — order-preserving JSON reader for requests (key
+  order is model input; `data.json` drops it past 8 keys).
 - `python/dump_traces.py` — dump golden traces from the torch oracle into
   `golden/`. These are the contract the port is tested against.
 - `python/prepare.py` — the reference converter; `golden/prepare.edn` pins
@@ -41,6 +45,8 @@ jolt kernels             # compile native/laya_kernels.c
 jolt prepare             # ../laya checkpoint -> data/   (LAYA_HOME to point elsewhere)
 jolt -M:test             # parity suites vs golden/
 jolt -M:run              # README quickstart demo
+jolt -M:serve            # HTTP API on http://127.0.0.1:8080
+jolt binary              # standalone ./laya-server, self-tested against golden/
 ```
 
 `jolt kernels` shells out to `cc`. `jolt prepare` needs only the checkpoint
@@ -62,6 +68,66 @@ or a literal with at most 8 entries); a hash-map would reorder them.
 (ag/system-one agent
                (email/email-state "Duplicate billing" raw-body :sender "customer@acme.com")
                (email/email-questions))
+```
+
+## HTTP API
+
+`laya.server` mirrors the [TypeSafe Jev API](https://docs.typesafe.ai/api):
+
+```
+POST /v1/systemone        Authorization: Bearer <key>   (only if a key is configured)
+{"state": <string|object|array>, "model": "rl-agent", "questions": {"<id>": {...}}}
+-> {"model": ..., "answers": {"<id>": {...}}, "usage": {"input_tokens": n, "output_tokens": 0}}
+
+GET  /health              -> {"status": "ok", "model": "rl-agent"}
+```
+
+Questions and answers have the shapes the Python `RLAgent.system_one`
+uses (choice / score / noul, plus the `rl_agent.act_probability` extension).
+`model` is optional and echoed back; it defaults to `rl-agent`. Errors:
+`401` for a missing or wrong key, `422` with
+`{"detail": [{"loc": ["body", "questions", "<id>", "criteria"], "msg": ..., "type": ...}]}`
+for anything wrong with the body (malformed JSON, missing state or
+questions, unknown type, criteria that don't fit the type or the head),
+`404`/`405` elsewhere, `413` past `:max-request-bytes` (4 MiB). Inference is
+serialized on one lock; the adapter's workers overlap only on I/O.
+
+```
+jolt -M:serve --port 8080 --host 0.0.0.0 --api-key s3cret   # or PORT / LAYA_HOST / LAYA_API_KEY / LAYA_DATA
+curl -s -H 'Authorization: Bearer s3cret' -H 'Content-Type: application/json' \
+  -d '{"state": "Help! My payouts have been failing for 3 days.",
+       "questions": {"is_urgent": {"type": "noul", "instructions": "Does this convey urgency?"}}}' \
+  http://127.0.0.1:8080/v1/systemone
+```
+
+### As a library
+
+Add this repo as a `:git/url` dep, run `jolt kernels` / `jolt prepare` for
+the native library and `data/`, then:
+
+```clojure
+(require '[laya.agent :as ag] '[laya.server :as server])
+(def agent (ag/load-agent "data"))                     ; ~1.7 GB of f32 weights, once
+(ag/system-one agent state questions)                  ; the Python API, as data
+(def h (server/handler agent {:api-key nil}))          ; a ring handler to mount anywhere
+(def s (server/start agent {:port 8080}))              ; or run it on ring-chez-adapter
+(server/stop s)
+```
+
+### As a binary
+
+`jolt binary` runs `jolt build -m laya.server -o laya-server` with the C
+kernels linked in statically, then runs `./laya-server --self-test` against
+`golden/`. The suite runs interpreted, and jolt 0.8.9's release build
+miscompiles one pattern (a `reduce` whose accumulator starts as `nil` and is
+tested with `nil?` — see `laya.tokenizer/lowest-ranked-pair`), so the binary
+proves itself before it ships. It still needs `data/` next to it (or
+`--data DIR`), ICU and BLAS from the OS, and libssl/libcrypto for the
+adapter.
+
+```
+./laya-server --data data --port 8080 --api-key s3cret
+./laya-server --self-test --data data --golden golden
 ```
 
 ## Native dependencies

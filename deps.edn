@@ -2,17 +2,24 @@
 
  ;; data.json reads tokenizer.json / the configs / the safetensors header in
  ;; `jolt prepare`. It needs java.time at load, which jolt-lang/time provides.
+ ;; ring-chez-adapter serves laya.server (jolt -M:serve / the built binary).
  :deps {org.clojure/data.json {:mvn/version "2.5.1"}
         io.github.jolt-lang/time {:git/url "https://github.com/jolt-lang/time.git"
-                                  :git/sha "abeee49974c2c4efa2fa75c96d9a379822c6815f"}}
+                                  :git/sha "abeee49974c2c4efa2fa75c96d9a379822c6815f"}
+        jolt-lang/ring-chez-adapter {:git/url "https://github.com/jolt-lang/ring-chez-adapter"
+                                     :git/tag "v0.7.4"
+                                     :git/sha "ce4a7459dcaa33c760c0a7323026ae4c0d260bd4"}}
 
  ;; kernels: built from native/laya_kernels.c by the `kernels` task.
  ;; icu: NFC for the tokenizer. mac ships libicucore in the shared cache;
  ;; linux distros name it libicuuc.so.<ver>.
  ;; blas: Accelerate framework on mac, OpenBLAS elsewhere.
+ ;; `jolt build` links the kernels statically from the archive so the binary
+ ;; is self-contained; run/repl/test load the shared object.
  :jolt/native [{:name "laya_kernels"
                 :darwin ["native/liblaya_kernels.dylib"]
-                :linux  ["native/liblaya_kernels.so"]}
+                :linux  ["native/liblaya_kernels.so"]
+                :static {:archive "native/liblaya_kernels.a"}}
                {:name "icu"
                 :darwin ["libicucore.dylib"]
                 :linux  ["libicuuc.so.76" "libicuuc.so.75" "libicuuc.so.74"
@@ -26,16 +33,30 @@
 
   :init (do (def mac? (some? (re-find #"^Mac" (System/getProperty "os.name"))))
             (def kern-lib (str "native/liblaya_kernels." (if mac? "dylib" "so")))
+            (def kern-archive "native/liblaya_kernels.a")
             (def laya-home (or (System/getenv "LAYA_HOME") "../laya")))
 
   kernels
-  {:doc "compile native/laya_kernels.c into the tensor-op kernel library"
-   :task (if (and (fs/exists? kern-lib)
-                  (empty? (fs/modified-since kern-lib ["native/laya_kernels.c"])))
-           (println "kernels: up to date -" kern-lib)
+  {:doc "compile native/laya_kernels.c into the kernel library (shared + static archive)"
+   :task (if (and (fs/exists? kern-lib) (fs/exists? kern-archive)
+                  (empty? (fs/modified-since kern-lib ["native/laya_kernels.c"]))
+                  (empty? (fs/modified-since kern-archive ["native/laya_kernels.c"])))
+           (println "kernels: up to date -" kern-lib kern-archive)
            (do (shell "cc" "-O2" "-std=c11" "-shared" "-fPIC"
                       "native/laya_kernels.c" "-o" kern-lib)
-               (println "built:" kern-lib)))}
+               (shell "cc" "-O2" "-std=c11" "-c" "-fPIC"
+                      "native/laya_kernels.c" "-o" "native/laya_kernels.o")
+               (shell "ar" "rcs" kern-archive "native/laya_kernels.o")
+               (fs/delete-if-exists "native/laya_kernels.o")
+               (println "built:" kern-lib kern-archive)))}
+
+  binary
+  {:doc "build the standalone HTTP server ./laya-server and self-test it against golden/"
+   :depends [kernels]
+   :task (do (shell "jolt" "build" "-m" "laya.server" "-o" "laya-server")
+             ;; the suite runs interpreted; the AOT build must prove itself
+             (shell "./laya-server" "--self-test" "--data" "data" "--golden" "golden")
+             (println "built: ./laya-server  (run: ./laya-server --data data --port 8080)"))}
 
   prepare
   {:doc "convert the Laya checkpoint (LAYA_HOME, default ../laya) into data/"
@@ -53,9 +74,11 @@
   {:doc "remove the compiled kernel library"
    :task (do (fs/delete-if-exists "native/liblaya_kernels.dylib")
              (fs/delete-if-exists "native/liblaya_kernels.so")
+             (fs/delete-if-exists "native/liblaya_kernels.a")
              (println "removed kernel libs"))}}
 
  :aliases {:test {:extra-paths ["test"]
                   :main-opts ["-m" "laya.test-runner"]}
            :run {:main-opts ["-m" "laya.demo"]}
-           :prepare {:main-opts ["-m" "laya.prepare"]}}}
+           :prepare {:main-opts ["-m" "laya.prepare"]}
+           :serve {:main-opts ["-m" "laya.server"]}}}

@@ -10,3 +10,5 @@ target/
 .jolt/
 .clj-kondo/
 .lsp/
+*.a
+laya-server

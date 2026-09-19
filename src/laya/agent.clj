@@ -115,7 +115,8 @@
                            (when (not= (count markers) (count (seq/render-options q)))
                              (throw (ex-info (format "question %s: options do not fit in head_max_len=%d tokens"
                                                      (pr-str qid) (:head-max-len cfg))
-                                             {:qid qid :head-max-len (:head-max-len cfg)})))
+                                             {:type :invalid-question :qid qid :field "criteria"
+                                              :head-max-len (:head-max-len cfg)})))
                            {:qid qid :q q :ids ids :markers markers :qtype (seq/qtypes (:t q))}))
                        qids)
         n-tokens (reduce + (map #(count (:ids %)) prepared))
