@@ -1,18 +1,22 @@
 (ns lev.run
   "jolt -M:run <workflow> [input] [--options JSON] [--constraints JSON] [--data DIR]
+              [--model NAME] [--thinking true|false] [--thinker PATH.gguf]
               [--workflows DIR[:DIR]] [--max-len N] [--head-max-len N]
    jolt -M:run --list
 
-  Run one workflow (lev.workflows) against the prepared model and print the
-  answer JSON. `input` is a JSON document (object, array or string) handed
-  to the workflow's `state` fn, or @path to read it from a file; without it
-  the state fn gets nil (demo then picks its example). --options is a JSON
+  Run one workflow (lev.workflows) against a model and print the answer
+  JSON. `input` is a JSON document (object, array or string) handed to the
+  workflow's `state` fn, or @path to read it from a file; without it the
+  state fn gets nil (demo then picks its example). --options is a JSON
   object for workflows whose `questions` take options; --constraints a JSON
-  list of lev.constraints added to the workflow's own."
+  list of lev.constraints added to the workflow's own. --model is a
+  checkpoint (english by default) or a thinker (config.edn :thinkers, or
+  --thinker / LEV_THINKER as `thinker`), --thinking its override."
   (:require [clojure.string :as str]
             [lev.agent :as ag]
             [lev.config :as cfg]
             [lev.json :as json]
+            [lev.router :as router]
             [lev.sequence :as seq]
             [lev.workflows :as wf])
   (:gen-class))
@@ -29,7 +33,8 @@
   nil) with the JSON options (string or nil) and the JSON constraints
   (string or nil, added to the workflow's own); answers as an ordered map."
   ([agent dirs name input options] (run-workflow agent dirs name input options nil))
-  ([agent dirs name input options constraints]
+  ([agent dirs name input options constraints] (run-workflow agent dirs name input options constraints nil))
+  ([agent dirs name input options constraints extra-opts]
    (let [wfs (wf/load-workflows dirs)
          w (or (get wfs name)
                (throw (ex-info (str "no workflow named " (pr-str name) "; known: "
@@ -41,7 +46,8 @@
          own (wf/constraints w opts)
          theirs (parse-json-arg constraints "--constraints")]
      (ag/system-one agent state questions
-                    {:constraints (when (or own theirs) (vec (concat own theirs)))}))))
+                    (merge {:constraints (when (or own theirs) (vec (concat own theirs)))}
+                           extra-opts)))))
 
 (defn list-workflows
   "Print name, source file and description of every workflow under dirs."
@@ -63,10 +69,14 @@
       (nil? name) (do (println (:doc (meta (find-ns 'lev.run)))) (System/exit 2))
       :else
       (try
-        (let [agent (ag/load-agent (cfg/setting ctx "--data" "LEV_DATA" :data "data")
-                                   (cfg/limits ctx "english"))]
-          (println (seq/json-str (run-workflow agent dirs name input (get opts "--options") (get opts "--constraints")))))
+        (let [model (get opts "--model" "english")
+              rt (router/make-router {:data (cfg/setting ctx "--data" "LEV_DATA" :data "data")
+                                      :thinkers (cfg/thinkers ctx)
+                                      :checkpoints (into {} (map (fn [n] [n (cfg/limits ctx n)])) router/names)})
+              agent (router/load-model rt model)
+              extra (when (contains? opts "--thinking") {:thinking (= "true" (str (get opts "--thinking")))})]
+          (println (seq/json-str (run-workflow agent dirs name input (get opts "--options") (get opts "--constraints") extra))))
         (catch Exception e
-          (if (#{:invalid-request :invalid-question :invalid-constraint} (:type (ex-data e)))
+          (if (#{:invalid-request :invalid-question :invalid-constraint :unknown-model :model-unavailable} (:type (ex-data e)))
             (do (binding [*out* *err*] (println "jolt run:" (ex-message e))) (System/exit 1))
             (throw e)))))))

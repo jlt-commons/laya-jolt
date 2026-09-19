@@ -89,7 +89,7 @@
   take a ~260 MB workspace; more rows buy little once the gemms are wide."
   8)
 
-(defn- round4 [x] (/ (double (Math/round (* 1e4 (double x)))) 1e4))
+(defn round4 [x] (/ (double (Math/round (* 1e4 (double x)))) 1e4))
 
 (defn- softmax [xs]
   (let [mx (reduce max xs)
@@ -110,13 +110,14 @@
 
 (defn- key-str [k] (if (keyword? k) (name k) (str k)))
 
-(defn- answer-for
-  "One typed answer. With a decision (`decided`, the label the constrained
-  decoder settled on) it follows the model's own answer field; without,
-  the map is laya 0.3.0's exactly."
-  [q p k actp decided]
-  (let [ext (array-map "act_probability" (round4 actp))
-        decided-kv (when (some? decided) [["decided" decided]])]
+(defn typed-answer
+  "One typed answer from the calibrated probabilities p (in option order;
+  a noul's are [false true], so \"noul\" is p[1]). With a decision
+  (`decided`, the label the constrained decoder settled on) it follows the
+  model's own answer field; `extra` ([k v] pairs, e.g. laya's action
+  head) closes the map. Without either, the map is laya 0.3.0's exactly."
+  [q p k decided extra]
+  (let [decided-kv (when (some? decided) [["decided" decided]])]
     (seq/ordered-map
      (case (:t q)
        "choice"
@@ -124,20 +125,20 @@
          (concat [["type" "choice"] ["choice" (nth ks (argmax p))]]
                  decided-kv
                  [["probabilities" (seq/ordered-map (map-indexed (fn [i c] [c (round4 (nth p i))]) ks))]
-                  ["confidence" (round4 (confidence-from-probs p k))]
-                  ["action" ext]]))
+                  ["confidence" (round4 (confidence-from-probs p k))]]
+                 extra))
        "score"
        (concat [["type" "score"] ["score" (round4 (reduce + (map-indexed (fn [i pi] (* i pi)) p)))]]
                decided-kv
                [["legend" (seq/ordered-map (map-indexed (fn [i c] [(str i) c]) (:crit q)))]
                 ["probabilities" (seq/ordered-map (map-indexed (fn [i pi] [(str i) (round4 pi)]) p))]
-                ["confidence" (round4 (confidence-from-probs p k))]
-                ["action" ext]])
+                ["confidence" (round4 (confidence-from-probs p k))]]
+               extra)
        (let [p1 (double (nth p 1))]
          (concat [["type" "noul"] ["noul" (round4 p1)]]
                  decided-kv
-                 [["confidence" (round4 (max p1 (- 1.0 p1)))]
-                  ["action" ext]]))))))
+                 [["confidence" (round4 (max p1 (- 1.0 p1)))]]
+                 extra))))))
 
 (defn- label-probs
   "p in the constraint schema's label order: a noul's options are rendered
@@ -145,11 +146,48 @@
   [q p]
   (if (= "noul" (:t q)) [(nth p 1) (nth p 0)] p))
 
-(defn- constraints-report [nodes sol]
+;; --- constraints, shared by every engine -------------------------------------
+
+(defn prepare-constraints
+  "The constraint schema and parsed nodes for `constraints` over the
+  validated question defs ([qid qdef] pairs), checked before any
+  inference; nil when there are no constraints (nil, not [])."
+  [qid-qdefs constraints]
+  (when (some? constraints)
+    (let [schema (c/schema (map (fn [[qid qdef]] [(key-str qid) qdef]) qid-qdefs))]
+      {:schema schema :nodes (c/parse schema constraints)})))
+
+(defn decide-constraints
+  "The joint decision over the per-question probabilities ([qid q p]
+  triples, p in answer order) under prepared constraints: the solution
+  (see lev.constraints/decode), throwing {:type :infeasible} when
+  on-infeasible is \"raise\" and nothing fits."
+  [{:keys [schema nodes]} qid-q-ps on-infeasible]
+  (let [sol (c/decode schema
+                      (into {} (map (fn [[qid q p]] [(key-str qid) (label-probs q p)]) qid-q-ps))
+                      nodes {})]
+    (when (and (not (:feasible sol)) (= "raise" (some-> on-infeasible name)))
+      (throw (ex-info "no assignment satisfies the constraints"
+                      {:type :infeasible
+                       :violations (mapv #(c/canonical (nth nodes %)) (:violations sol))})))
+    sol))
+
+(defn decided-label
+  "The label the solution chose for qid, as the answer spells it."
+  [{:keys [schema]} solution qid]
+  (let [q (key-str qid)]
+    (nth (get-in schema [q :labels]) (get-in solution [:assignment q]))))
+
+(defn constraints-report [{:keys [nodes]} sol]
   (seq/ordered-map [["feasible" (:feasible sol)]
                     ["decoder" (:decoder sol)]
                     ["exact" (:exact sol)]
                     ["violations" (mapv #(c/canonical (nth nodes %)) (:violations sol))]]))
+
+(defmulti system-one*
+  "The engine behind system-one, by the agent's :kind: :laya (the
+  encoders, here) or :thinker (lev.think)."
+  (fn [agent _state _questions _opts] (:kind agent :laya)))
 
 (defn system-one
   "state + {qid -> qdef} -> Jev answer map (ordered to match json.dumps).
@@ -163,9 +201,13 @@
   (default: the fewest violated constraints, then the best score) or
   `raise` (ex-info {:type :infeasible :violations [...]}). A bad
   constraint is ex-info {:type :invalid-constraint :index i}, thrown
-  before any inference."
+  before any inference. A thinker agent (lev.think) takes :thinking and
+  :thought as well."
   ([agent state questions] (system-one agent state questions nil))
-  ([agent state questions {:keys [constraints on-infeasible]}]
+  ([agent state questions opts] (system-one* agent state questions opts)))
+
+(defmethod system-one* :laya
+  [agent state questions {:keys [constraints on-infeasible]}]
   (let [{:keys [cfg tok w]} agent
         qids (vec (keys questions))
         prepared (mapv (fn [qid]
@@ -183,9 +225,7 @@
                        qids)
         ;; the constraints are checked against the questions before the
         ;; forward pass, so a bad one costs nothing
-        schema (when (some? constraints)
-                 (c/schema (map (fn [{:keys [qid qdef]}] [(key-str qid) qdef]) prepared)))
-        nodes (when schema (c/parse schema constraints))
+        cs (prepare-constraints (map (fn [{:keys [qid qdef]}] [qid qdef]) prepared) constraints)
         n-tokens (reduce + (map #(count (:ids %)) prepared))
         ;; the questions share every gemm of the forward, in batches of at
         ;; most max-batch rows so the workspace stays a few hundred MB
@@ -208,26 +248,16 @@
                               :p (softmax (mapv #(/ (double %) temp) (take k logits)))
                               :actp (first (softmax act))}))
                          prepared outputs)
-        solution (when nodes
-                   (let [sol (c/decode schema
-                                       (into {} (map (fn [{:keys [qid q]} {:keys [p]}] [(key-str qid) (label-probs q p)])
-                                                     prepared calibrated))
-                                       nodes {})]
-                     (when (and (not (:feasible sol)) (= "raise" (some-> on-infeasible name)))
-                       (throw (ex-info "no assignment satisfies the constraints"
-                                       {:type :infeasible
-                                        :violations (mapv #(c/canonical (nth nodes %)) (:violations sol))})))
-                     sol))
-        decided-label (fn [qid]
-                        (when solution
-                          (let [q (key-str qid)]
-                            (nth (get-in schema [q :labels]) (get-in solution [:assignment q])))))
+        solution (when cs
+                   (decide-constraints cs (map (fn [{:keys [qid q]} {:keys [p]}] [qid q p]) prepared calibrated)
+                                       on-infeasible))
         answers (seq/ordered-map
                  (map (fn [{:keys [qid q]} {:keys [k p actp]}]
-                        [qid (answer-for q p k actp (decided-label qid))])
+                        [qid (typed-answer q p k (when solution (decided-label cs solution qid))
+                                           [["action" (array-map "act_probability" (round4 actp))]])])
                       prepared calibrated))]
     (seq/ordered-map
      (concat [["model" "laya-rl-agent"]
               ["answers" answers]
               ["usage" (array-map "input_tokens" n-tokens "output_tokens" 0)]]
-             (when solution [["constraints" (constraints-report nodes solution)]]))))))
+             (when solution [["constraints" (constraints-report cs solution)]])))))

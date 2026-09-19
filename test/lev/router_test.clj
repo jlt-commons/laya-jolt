@@ -117,3 +117,55 @@
       (is (= {:max-len 768 :head-max-len 192} (router/effective-limits r "english")))
       (is (= {:max-len 2048 :head-max-len 300} (router/effective-limits r "multilingual")))
       (is (nil? (router/effective-limits (router/make-router {:models {"english" "target/nowhere"} :loader (fn [& _])}) "english"))))))
+
+(deftest thinkers-are-models-of-their-own
+  (let [log (atom [])
+        fake-thinker (fn [name cfg] (swap! log conj [:thinker name]) {:kind :thinker :name name :cfg cfg
+                                                                     :decide (fn [& _]) :count-tokens (fn [& _] 0)})
+        r (router/make-router {:models {"english" tu/data-dir}
+                               :thinkers {"minicpm5" {:model "target/no-such.gguf" :thinking true}
+                                          "direct" {:model "target/no-such.gguf" :thinking false}}
+                               :loader (fake-loader log)
+                               :thinker-loader fake-thinker})]
+    (testing "names: a thinker is a known model, not an alias of a checkpoint"
+      (is (= "minicpm5" (router/normalise-name r "minicpm5")))
+      (is (= "minicpm5" (router/normalise-name r " MiniCPM5 ")))
+      (is (thrown-with-msg? Exception #"unknown model" (router/normalise-name r "gpt")))
+      (is (= ["english" "multilingual" "typed-decisions"] router/names))
+      (is (= ["direct" "minicpm5"] (router/thinker-names r)))
+      (is (router/thinker? r "minicpm5"))
+      (is (not (router/thinker? r "english"))))
+    (testing "explicit only: content routing never picks a thinker"
+      (let [d (router/route r "Refund me." {} :model "minicpm5")]
+        (is (= "minicpm5" (get d "model")))
+        (is (nil? (get d "repo")))
+        (is (= "explicit model='minicpm5'" (get d "reason"))))
+      (is (= "english" (get (router/route r "Refund me." {}) "model"))))
+    (testing "loaded through the thinker loader, kept in their own slot, evicted least recently used past :max-thinkers (1)"
+      (let [a (router/load-model r "minicpm5")]
+        (is (= :thinker (:kind a)))
+        (is (= [[:thinker "minicpm5"]] @log))
+        (is (= ["minicpm5"] (router/loaded-thinkers r)))
+        (router/load-model r "english")
+        (is (= ["english"] (router/loaded r)) "a checkpoint does not evict a thinker")
+        (is (= ["minicpm5"] (router/loaded-thinkers r)))
+        (router/load-model r "direct")
+        (is (= ["direct"] (router/loaded-thinkers r)))
+        (is (= [[:thinker "minicpm5"] "english" [:thinker "direct"]] @log))))
+    (testing "availability: the file must exist and the llm native be built"
+      (is (false? (router/available? r "minicpm5"))))
+    (testing "predict hands :thinking and :thought to the thinker"
+      (let [seen (atom nil)
+            r2 (router/make-router {:thinkers {"t" {:model "x.gguf"}}
+                                    :loader (fake-loader (atom []))
+                                    :thinker-loader (fn [name cfg]
+                                                      {:kind :thinker :name name :cfg cfg
+                                                       :decide (fn [prompt options opts]
+                                                                 (reset! seen [options opts])
+                                                                 {:logp (vec (repeat (count options) -1.0)) :thought "" :tokens 0})
+                                                       :count-tokens (fn [_] 1)})})
+            out (router/predict r2 "s" {"q" {"type" "noul" "instructions" "?"}} :model "t" :thinking false)]
+        (is (= ["true" "false"] (first @seen)))
+        (is (= 0 (:think-max (second @seen))))
+        (is (= "t" (get out "model")))
+        (is (= "t" (get-in out ["routing" "model"])))))))

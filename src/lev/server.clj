@@ -5,10 +5,11 @@
 
     POST /v1/systemone        {\"state\" ..., \"questions\" {...},
                                \"constraints\"? [...], \"on_infeasible\"?,
-                               \"model\"? \"lang\"? \"task\"?}
+                               \"model\"? \"lang\"? \"task\"?
+                               \"thinking\"? bool, \"thought\"? bool}
                               -> {\"model\" \"laya-rl-agent\", \"answers\" {...},
-                                  \"usage\" {...}, \"constraints\"? {...},
-                                  \"routing\" {...}}
+                                  \"usage\" {...}, \"thinking\"? {...},
+                                  \"constraints\"? {...}, \"routing\" {...}}
     POST /v1/route            same body, questions optional -> the routing
                               decision alone, nothing loaded or run
     POST /v1/workflows/:name  {\"input\" ..., \"options\"? {...},
@@ -21,9 +22,12 @@
                                \"loaded\" [...], \"workflows\" [...]}
 
   `model` is absent (or the engine's own name, laya-rl-agent) to route by
-  content, or a checkpoint name / alias (english, multilingual,
-  typed-decisions, en, ml, ...) to pick one; `lang` and `task` are the
-  Router's other hints. `constraints` is a list of lev.constraints over
+  content, a checkpoint name / alias (english, multilingual,
+  typed-decisions, en, ml, ...) to pick one, or a thinker's name (the
+  generative models config.edn :thinkers / --thinker declare; lev.think)
+  for the slow accurate answer, with `thinking` (bool) overriding the
+  thinker's default and `thought` (bool) adding its reasoning to each
+  answer; `lang` and `task` are the Router's other hints. `constraints` is a list of lev.constraints over
   the question ids (a workflow's own come first, the request's are added),
   decided jointly after the forward pass: every answer then carries
   `decided` and the body a `constraints` report; `on_infeasible` is
@@ -53,6 +57,7 @@
             [lev.agent :as ag]
             [lev.config :as cfg]
             [lev.json :as json]
+            [lev.llm]
             [lev.router :as router]
             [lev.sequence :as seq]
             [lev.tokenizer :as tk]
@@ -121,18 +126,29 @@
        (json/read-str text)))))
 
 (defn- check-routing-fields
-  "model / lang / task must be strings, and model a known checkpoint (or
-  the engine's own name)."
-  [body]
-  (concat
-   (for [k ["model" "lang" "task"]
-         :when (and (contains? body k) (not (string? (get body k))))]
-     (detail ["body" k] (str k " must be a string") "type_error"))
-   (let [m (get body "model")]
-     (when (and (string? m) (not (engine-names m)))
-       (try (router/normalise-name m) nil
-            (catch Exception e
-              [(detail ["body" "model"] (ex-message e) "value_error")]))))))
+  "model / lang / task must be strings, and model a known checkpoint or
+  thinker (or the engine's own name); thinking / thought booleans, and
+  only with a thinker."
+  [rt body]
+  (let [m (get body "model")
+        known (when (and (string? m) (not (engine-names m)))
+                (try (router/normalise-name rt m) nil
+                     (catch Exception e
+                       [(detail ["body" "model"] (ex-message e) "value_error")])))
+        thinker? (and (string? m) (not (engine-names m)) (nil? known) (router/thinker? rt m))]
+    (concat
+     (for [k ["model" "lang" "task"]
+           :when (and (contains? body k) (not (string? (get body k))))]
+       (detail ["body" k] (str k " must be a string") "type_error"))
+     known
+     (for [k ["thinking" "thought"]
+           :when (contains? body k)
+           :let [v (get body k)]
+           :when (or (not (boolean? v)) (not thinker?))]
+       (if (boolean? v)
+         (detail ["body" k] (str k " applies to a thinker model (model: one of "
+                                (str/join ", " (router/thinker-names rt)) ")") "value_error")
+         (detail ["body" k] (str k " must be true or false") "type_error"))))))
 
 (def ^:private infeasible-modes #{"min_violations" "raise"})
 
@@ -166,11 +182,11 @@
   "Everything wrong with a parsed /v1/systemone body, as detail entries.
   Each question is checked with agent/validate-question, so the reasons
   match the library."
-  [body]
+  [rt body]
   (if-not (map? body)
     [(detail ["body"] "request body must be a JSON object" "type_error")]
     (vec (concat (check-state body)
-                 (check-routing-fields body)
+                 (check-routing-fields rt body)
                  (check-constraints body)
                  (check-questions (get body "questions"))))))
 
@@ -183,16 +199,19 @@
      :lang (get body "lang")
      :task (get body "task")
      :constraints (get body "constraints")
-     :on-infeasible (get body "on_infeasible")}))
+     :on-infeasible (get body "on_infeasible")
+     :thinking (get body "thinking")
+     :thought (get body "thought")}))
 
 (defn- predict
   "router/predict under the inference lock, with the errors the decoder
   throws pointed at the request: a bad constraint at its index among the
   request's own (`offset` of them belong to the workflow)."
-  [rt lock state questions {:keys [model lang task constraints on-infeasible]} offset]
+  [rt lock state questions {:keys [model lang task constraints on-infeasible thinking thought]} offset]
   (try (locking lock
          (router/predict rt state questions :model model :lang lang :task task
-                         :constraints constraints :on-infeasible on-infeasible))
+                         :constraints constraints :on-infeasible on-infeasible
+                         :thinking thinking :thought thought))
        (catch Exception e
          (if (= :invalid-constraint (:type (ex-data e)))
            (throw (ex-info (ex-message e) (assoc (ex-data e) :offset offset)))
@@ -204,7 +223,7 @@
   "Answer one parsed /v1/systemone body: route, load if needed, infer.
   Inference is serialized on lock."
   [rt lock body]
-  (let [details (check-request body)]
+  (let [details (check-request rt body)]
     (if (seq details)
       (unprocessable details)
       (json-response 200 (predict rt lock (get body "state") (get body "questions") (routing-opts body) 0)))))
@@ -215,7 +234,7 @@
   (let [details (if-not (map? body)
                   [(detail ["body"] "request body must be a JSON object" "type_error")]
                   (concat (check-state body)
-                          (check-routing-fields body)
+                          (check-routing-fields rt body)
                           (when (and (contains? body "questions") (not (map? (get body "questions"))))
                             [(detail ["body" "questions"] "questions must be an object" "type_error")])))]
     (if (seq details)
@@ -242,7 +261,7 @@
       (unprocessable [(detail ["body" "options"] "options must be an object" "type_error")])
 
       :else
-      (let [details (concat (check-routing-fields body) (check-constraints body))]
+      (let [details (concat (check-routing-fields rt body) (check-constraints body))]
         (if (seq details)
           (unprocessable details)
           (let [state (wf/state w (get body "input"))
@@ -263,13 +282,22 @@
 (defn- health [rt workflows]
   (json-response 200 (seq/ordered-map [["status" "ok"] ["model" default-model]
                                        ["loaded" (router/loaded rt)]
+                                       ["thinkers" (router/loaded-thinkers rt)]
                                        ["workflows" (vec (sort (keys workflows)))]])))
 
 (defn- models [rt]
-  (let [loaded (set (router/loaded rt))]
+  (let [loaded (set (router/loaded rt))
+        loaded-thinkers (set (router/loaded-thinkers rt))]
     (json-response 200 (seq/ordered-map
                         [["default" (:default rt)]
                          ["max_loaded" (:max-loaded rt)]
+                         ["thinkers" (seq/ordered-map
+                                      (for [name (router/thinker-names rt)
+                                            :let [cfg (get (:thinkers rt) name)]]
+                                        [name (seq/ordered-map [["model" (:model cfg)]
+                                                                ["available" (router/available? rt name)]
+                                                                ["loaded" (contains? loaded-thinkers name)]
+                                                                ["thinking" (boolean (get cfg :thinking true))]])]))]
                          ["models" (seq/ordered-map
                                     (for [[name dir] (:models rt)]
                                       [name (seq/ordered-map [["repo" (get router/repos name)]
@@ -359,9 +387,13 @@
   json.dumps(Agent.system_one(...)) pinned in <golden-dir>/readme.edn, plus
   the tokenizer paths a release build has miscompiled before. Answers
   [[name ok? detail] ...]. The test suite runs interpreted; this is what
-  proves the AOT binary computes the same thing."
+  proves the AOT binary computes the same thing. With a router whose
+  first available thinker can load, one question also goes through it
+  without thinking: the proof that llama.cpp is linked in and runs."
   [agent golden-dir]
-  (let [h (handler agent {})
+  (let [rt (if (router/router? agent) agent (router/preloaded agent))
+        agent (router/load-model rt "english")
+        h (handler rt {})
         golden (fn [name] (edn/read-string {:readers {'laya/omap seq/ordered-map}}
                                            (slurp (str golden-dir "/" name ".edn"))))
         cases (golden "cases")
@@ -394,20 +426,29 @@
     [["README quickstart answer matches the Python engine" answer-ok
       (when-not answer-ok (str "got " (seq/json-str got)))]
      ["tokenizer reproduces golden/tok.edn" tok-ok nil]
-     ["NFC expansion path" nfc-ok nil]]))
+     ["NFC expansion path" nfc-ok nil]
+     (when-let [name (first (filter #(router/available? rt %) (router/thinker-names rt)))]
+       (let [[ok detail] (try (let [out (router/predict rt (:readme-state cases)
+                                                        (select-keys (:readme-questions cases) ["is_phishing"])
+                                                        :model name :thinking false)]
+                                [(contains? #{true false} (< 0.5 (get-in out ["answers" "is_phishing" "noul"])))
+                                 (str name ": " (seq/json-str (get-in out ["answers" "is_phishing"])))])
+                              (catch Exception e [false (ex-message e)]))]
+         [(str "the thinker answers (" (lev.llm/version) ")") ok detail]))]))
 
 (defn -main
   "jolt -M:serve [--data DIR] [--port N] [--host ADDR] [--api-key KEY]
                  [--max-loaded N] [--default-model NAME] [--workflows DIR[:DIR]]
-                 [--max-len N] [--head-max-len N]
+                 [--max-len N] [--head-max-len N] [--thinker PATH.gguf] [--max-thinkers N]
    Each falls back to an environment variable (LEV_DATA, PORT, LEV_HOST,
-   LEV_API_KEY, LAYA_MAX_LOADED, LAYA_DEFAULT_MODEL, LEV_WORKFLOWS,
-   LEV_MAX_LEN, LEV_HEAD_MAX_LEN), then to ~/.config/lev/config.edn (:data
-   :port :host :api-key :max-loaded :default-model :auto-task-detection
-   :workflow-dirs :max-len :head-max-len :checkpoints), then to a default.
+   LEV_API_KEY, LEV_MAX_LOADED, LEV_DEFAULT_MODEL, LEV_WORKFLOWS,
+   LEV_MAX_LEN, LEV_HEAD_MAX_LEN, LEV_THINKER, LEV_MAX_THINKERS), then to
+   ~/.config/lev/config.edn (:data :port :host :api-key :max-loaded
+   :default-model :auto-task-detection :workflow-dirs :max-len
+   :head-max-len :checkpoints :thinkers :max-thinkers), then to a default.
    DIR is the data root jolt prepare writes: DIR/ (english),
    DIR/multilingual, DIR/typed-decisions; the default checkpoint is loaded
-   at startup, the others on first use.
+   at startup, the others and the thinkers on first use.
    --self-test [--golden DIR]: load, verify against golden/, exit 0 or 1."
   [& args]
   (let [opts (cfg/parse-args args)
@@ -415,8 +456,10 @@
         arg (fn [flag env key default] (cfg/setting ctx flag env key default))
         data-dir (arg "--data" "LEV_DATA" :data "data")
         rt (router/make-router {:data data-dir
-                                :max-loaded (Long/parseLong (str (arg "--max-loaded" "LAYA_MAX_LOADED" :max-loaded "1")))
-                                :default (arg "--default-model" "LAYA_DEFAULT_MODEL" :default-model "english")
+                                :max-loaded (Long/parseLong (str (arg "--max-loaded" "LEV_MAX_LOADED" :max-loaded "1")))
+                                :max-thinkers (Long/parseLong (str (arg "--max-thinkers" "LEV_MAX_THINKERS" :max-thinkers "1")))
+                                :thinkers (cfg/thinkers ctx)
+                                :default (arg "--default-model" "LEV_DEFAULT_MODEL" :default-model "english")
                                 :auto-task-detection (or (true? (get opts "--auto-task-detection"))
                                                          (true? (:auto-task-detection (:config ctx))))
                                 ;; cfg/limits resolves CLI > env > config per name; the
@@ -437,7 +480,7 @@
                          (str " (trained " (:trained-max-len agent) ")") "")
                        (:head-max-len (:cfg agent))))]
     (if (get opts "--self-test")
-      (let [results (self-test agent (arg "--golden" "LEV_GOLDEN" :golden "golden"))]
+      (let [results (self-test rt (arg "--golden" "LEV_GOLDEN" :golden "golden"))]
         (doseq [[name ok? detail] results]
           (println (if ok? "ok  " "FAIL") name (or detail "")))
         (System/exit (if (every? second results) 0 1)))
@@ -449,5 +492,10 @@
         (log "workflows:" (if (seq workflows) (str/join ", " (sort (keys workflows))) "none"))
         (log "checkpoints:" (str/join ", " (for [n router/names]
                                              (str n (if (router/available? rt n) "" " (not prepared)")))))
+        (log "thinkers:" (if (seq (router/thinker-names rt))
+                           (str/join ", " (for [n (router/thinker-names rt)]
+                                            (str n " (" (:model (get (:thinkers rt) n))
+                                                 (if (router/available? rt n) ")" "; not available)"))))
+                           "none (config.edn :thinkers or --thinker PATH.gguf)"))
         (log (format "listening on http://%s:%d (auth %s)" host (:port server) (if api-key "on" "off")))
         @(promise)))))

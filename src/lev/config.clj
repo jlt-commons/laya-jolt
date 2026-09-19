@@ -13,12 +13,15 @@
                      sequence limits for every checkpoint, instead of the
                      ones prepare took from rl_agent_config.json
     :checkpoints     {\"name\" {:max-len .. :head-max-len ..}} per checkpoint
+    :thinkers        {\"name\" {:model \"x.gguf\" :thinking true ...}} generative
+                     models (lev.think) the server offers under that name
 
   Environment:
     LEV_CONFIG_DIR  instead of $XDG_CONFIG_HOME/lev or ~/.config/lev
     LEV_WORKFLOWS   dir[:dir...] to scan for workflows INSTEAD of the
                      defaults (bundled ./workflows, :workflow-dirs, the
                      config dir's workflows/)
+    LEV_THINKER     a GGUF path: the thinker named `thinker` (--thinker)
 
   The pure functions take an `env` map so tests never read the real
   environment; nil means the process environment."
@@ -122,3 +125,23 @@
                from-env
                from-cli)
         {})))
+
+(defn thinkers
+  "The generative models a server can offer, {name {:model gguf-path ...}}:
+  config.edn :thinkers (names as keywords or strings; the rest of each
+  entry is lev.think config), plus --thinker PATH or LEV_THINKER as the
+  one named `thinker`. Throws when an entry names no :model."
+  [{:keys [opts env config]}]
+  (let [from-config (into {}
+                          (map (fn [[k v]]
+                                 (let [name (if (keyword? k) (clojure.core/name k) (str k))]
+                                   (when-not (and (map? v) (string? (:model v)))
+                                     (throw (ex-info (str "config.edn :thinkers " (pr-str name) " needs a :model (a GGUF path)")
+                                                     {:thinker name :entry v})))
+                                   [name v])))
+                          (:thinkers config))
+        cli (get opts "--thinker")
+        from-env (getenv env "LEV_THINKER")
+        one (cond (string? cli) cli from-env from-env)]
+    (cond-> from-config
+      one (assoc "thinker" {:model one}))))

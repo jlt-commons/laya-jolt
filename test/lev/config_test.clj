@@ -80,3 +80,18 @@
       (is (= {} (cfg/limits {:opts {} :env {} :config {}} "english"))))
     (testing "values are integers whatever the source"
       (is (= {:max-len 700} (cfg/limits {:opts {} :env {} :config {:max-len "700"}} "english"))))))
+
+(deftest thinkers-from-config-cli-and-env
+  (testing "config.edn :thinkers, names as strings, each entry with its model path"
+    (is (= {"minicpm5" {:model "/m/MiniCPM5-2B-Q8_0.gguf" :thinking true :max-think-tokens 512}}
+           (cfg/thinkers {:opts {} :env {} :config {:thinkers {:minicpm5 {:model "/m/MiniCPM5-2B-Q8_0.gguf" :thinking true :max-think-tokens 512}}}})))
+    (is (= {} (cfg/thinkers {:opts {} :env {} :config {}}))))
+  (testing "--thinker PATH / LEV_THINKER add (or replace) the one named `thinker`"
+    (is (= {"thinker" {:model "/cli.gguf"}}
+           (cfg/thinkers {:opts {"--thinker" "/cli.gguf"} :env {"LEV_THINKER" "/env.gguf"} :config {}})))
+    (is (= {"thinker" {:model "/env.gguf"}}
+           (cfg/thinkers {:opts {} :env {"LEV_THINKER" "/env.gguf"} :config {}})))
+    (is (= {"a" {:model "/a.gguf"} "thinker" {:model "/env.gguf"}}
+           (cfg/thinkers {:opts {} :env {"LEV_THINKER" "/env.gguf"} :config {:thinkers {"a" {:model "/a.gguf"}}}}))))
+  (testing "a thinker entry must name a model"
+    (is (thrown-with-msg? Exception #"minicpm5.*:model" (cfg/thinkers {:opts {} :env {} :config {:thinkers {:minicpm5 {:thinking true}}}})))))

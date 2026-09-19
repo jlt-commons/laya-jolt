@@ -20,12 +20,20 @@
   A router holds prepared data directories per checkpoint ({name dir}, by
   default data/, data/multilingual, data/typed-decisions), loads an agent on
   first use and keeps :max-loaded of them resident, evicting the least
-  recently used: all three together are ~4.6 GB of f32."
+  recently used: all three together are ~4.6 GB of f32.
+
+  It also holds the thinkers (:thinkers {name lev.think config}, from
+  config.edn): generative models that answer the same questions slowly
+  and much more accurately (lev.think). A thinker is a model name like a
+  checkpoint's, chosen explicitly only (never by content), loaded on first
+  use into its own slot (:max-thinkers, default 1: they are GBs each)."
   (:require [clojure.edn]
             [clojure.string :as str]
             [lev.agent :as ag]
             [lev.lang :as lang]
-            [lev.sequence :as seq]))
+            [lev.llm :as llm]
+            [lev.sequence :as seq]
+            [lev.think :as think]))
 
 (def bundle-repo "convaiinnovations/laya")
 
@@ -60,16 +68,22 @@
                     ["typed-decisions" (str data-root "/typed-decisions")]]))
 
 (defn normalise-name
-  "Canonical checkpoint name for a name or alias, case- and space-insensitive.
-  Throws {:type :unknown-model} otherwise."
-  [name]
-  (let [key (str/lower-case (str/trim (str name)))
-        key (get aliases key key)]
-    (when-not (contains? repos key)
-      (throw (ex-info (str "unknown model " (pr-str name) "; choose one of " (str/join ", " names)
-                          " (or an alias: " (str/join ", " (sort (keys aliases))) ")")
-                      {:type :unknown-model :model name :known names :aliases (sort (keys aliases))})))
-    key))
+  "Canonical checkpoint name for a name or alias, case- and space-insensitive;
+  with a router, one of its thinkers' names too. Throws {:type
+  :unknown-model} otherwise."
+  ([name] (normalise-name nil name))
+  ([router name]
+   (let [key (str/lower-case (str/trim (str name)))
+         key (get aliases key key)
+         thinkers (when router (sort (keys (:thinkers router))))]
+     (when-not (or (contains? repos key) (some #(= key (str/lower-case %)) thinkers))
+       (throw (ex-info (str "unknown model " (pr-str name) "; choose one of " (str/join ", " (concat names thinkers))
+                           " (or an alias: " (str/join ", " (sort (keys aliases))) ")")
+                       {:type :unknown-model :model name :known (vec (concat names thinkers))
+                        :aliases (sort (keys aliases))})))
+     (if (contains? repos key)
+       key
+       (some #(when (= key (str/lower-case %)) %) thinkers)))))
 
 (defn match-typed-decisions-workflow
   "Name of the typed-decisions workflow whose question ids these are exactly,
@@ -98,9 +112,13 @@
   checkpoint (\"english\"), :auto-task-detection (false), :limits
   {:max-len :head-max-len} for every checkpoint and :checkpoints {name
   {...}} per checkpoint (lev.config/limits builds these from config.edn),
-  :loader (fn [name dir limits] agent) for tests (default load-prepared)."
-  [{:keys [models data max-loaded default auto-task-detection loader limits checkpoints]
-    :or {max-loaded 1 default "english" auto-task-detection false}}]
+  :loader (fn [name dir limits] agent) for tests (default load-prepared);
+  :thinkers {name lev.think config} (lev.config/thinkers), :max-thinkers
+  (default 1), :thinker-loader (fn [name cfg] agent) for tests (default
+  lev.think/thinker)."
+  [{:keys [models data max-loaded default auto-task-detection loader limits checkpoints
+           thinkers max-thinkers thinker-loader]
+    :or {max-loaded 1 default "english" auto-task-detection false max-thinkers 1}}]
   {:models (into (default-models (or data "data"))
                  (map (fn [[k v]] [(normalise-name k) v])) models)
    :max-loaded (max 1 (long max-loaded))
@@ -109,20 +127,25 @@
    :limits (or limits {})
    :checkpoints (into {} (map (fn [[k v]] [(normalise-name k) v])) checkpoints)
    :loader (or loader load-prepared)
+   :thinkers (into {} (map (fn [[k v]] [(if (keyword? k) (name k) (str k)) v])) thinkers)
+   :max-thinkers (max 1 (long max-thinkers))
+   :thinker-loader (or thinker-loader (fn [name cfg] (think/thinker (assoc cfg :name name))))
    :agents (atom {})
-   :order (atom [])})            ; least recently used first
+   :order (atom [])             ; least recently used first
+   :thinker-agents (atom {})
+   :thinker-order (atom [])})
 
 (defn limits-for
   "The configured sequence limits for one checkpoint: the router-wide ones
   under its per-checkpoint entry."
   [router name]
-  (merge (:limits router) (get (:checkpoints router) (normalise-name name))))
+  (merge (:limits router) (get (:checkpoints router) (normalise-name router name))))
 
 (defn effective-limits
   "{:max-len :head-max-len} the checkpoint runs with: its prepared config.edn
   under the configured overrides; nil when it is not prepared."
   [router name]
-  (let [key (normalise-name name)
+  (let [key (normalise-name router name)
         dir (get (:models router) key)
         f (clojure.java.io/file dir "config.edn")]
     (when (and dir (.exists f))
@@ -137,7 +160,7 @@
   ([agent name] (preloaded agent name {}))
   ([agent name opts]
    (let [r (make-router opts)
-         key (normalise-name name)]
+         key (normalise-name r name)]
      (swap! (:agents r) assoc key agent)
      (swap! (:order r) conj key)
      r)))
@@ -146,49 +169,84 @@
   [x]
   (and (map? x) (contains? x :agents) (contains? x :loader)))
 
-(defn available?
-  "Is this checkpoint's data directory prepared?"
+(defn thinker-names
+  "The configured thinkers, sorted."
+  [router]
+  (vec (sort (keys (:thinkers router)))))
+
+(defn thinker?
+  "Does `name` name one of the router's thinkers?"
   [router name]
-  (let [dir (get (:models router) (normalise-name name))]
-    (boolean (and dir (.exists (clojure.java.io/file dir "manifest.edn"))))))
+  (contains? (:thinkers router) (normalise-name router name)))
+
+(defn available?
+  "Is this checkpoint's data directory prepared (or, for a thinker, its
+  GGUF on disk and the llm native built)?"
+  [router name]
+  (let [key (normalise-name router name)]
+    (if (thinker? router key)
+      (boolean (and (llm/available?)
+                    (.exists (clojure.java.io/file (:model (get (:thinkers router) key))))))
+      (let [dir (get (:models router) key)]
+        (boolean (and dir (.exists (clojure.java.io/file dir "manifest.edn"))))))))
 
 (defn loaded
   "Resident checkpoints, least recently used first."
   [router]
   @(:order router))
 
-(defn- touch! [router key]
-  (swap! (:order router) #(conj (vec (remove #{key} %)) key)))
+(defn loaded-thinkers
+  "Resident thinkers, least recently used first."
+  [router]
+  @(:thinker-order router))
 
-(defn- evict! [{:keys [agents order max-loaded]}]
-  (while (> (count @order) max-loaded)
+(defn- touch! [order key]
+  (swap! order #(conj (vec (remove #{key} %)) key)))
+
+(defn- evict! [agents order max]
+  (while (> (count @order) max)
     (let [victim (first @order)]
       (swap! order subvec 1)
       (swap! agents dissoc victim))))
 
 (defn load-model
   "The agent for `name`, loading it on first use (and evicting the least
-  recently used past :max-loaded)."
+  recently used past :max-loaded; thinkers have their own slot,
+  :max-thinkers)."
   [router name]
-  (let [key (normalise-name name)]
-    (if-let [agent (get @(:agents router) key)]
-      (do (touch! router key) agent)
-      (let [dir (get (:models router) key)]
-        (let [agent ((:loader router) key dir (limits-for router key))]
+  (let [key (normalise-name router name)]
+    (if (thinker? router key)
+      (let [{:keys [thinker-agents thinker-order max-thinkers]} router]
+        (if-let [agent (get @thinker-agents key)]
+          (do (touch! thinker-order key) agent)
+          (let [agent ((:thinker-loader router) key (get (:thinkers router) key))]
+            (swap! thinker-agents assoc key agent)
+            (touch! thinker-order key)
+            (evict! thinker-agents thinker-order max-thinkers)
+            agent)))
+      (if-let [agent (get @(:agents router) key)]
+        (do (touch! (:order router) key) agent)
+        (let [dir (get (:models router) key)
+              agent ((:loader router) key dir (limits-for router key))]
           (swap! (:agents router) assoc key agent)
-          (touch! router key)
-          (evict! router)
+          (touch! (:order router) key)
+          (evict! (:agents router) (:order router) (:max-loaded router))
           agent)))))
 
 (defn unload
-  "Free one checkpoint, or all of them."
+  "Free one model, or all of them."
   ([router]
    (reset! (:agents router) {})
-   (reset! (:order router) []))
+   (reset! (:order router) [])
+   (reset! (:thinker-agents router) {})
+   (reset! (:thinker-order router) []))
   ([router name]
-   (let [key (normalise-name name)]
-     (swap! (:agents router) dissoc key)
-     (swap! (:order router) #(vec (remove #{key} %))))))
+   (let [key (normalise-name router name)
+         [agents order] (if (thinker? router key)
+                          [(:thinker-agents router) (:thinker-order router)]
+                          [(:agents router) (:order router)])]
+     (swap! agents dissoc key)
+     (swap! order #(vec (remove #{key} %))))))
 
 ;; --- routing --------------------------------------------------------------------------
 
@@ -198,6 +256,7 @@
   (str "'" s "'"))
 
 (defn- decision [model reason detection workflow]
+  ;; a thinker has no Hub repo: its "repo" is nil
   (seq/ordered-map [["model" model] ["repo" (get repos model)] ["reason" reason]
                     ["detection" detection] ["workflow" workflow]]))
 
@@ -208,7 +267,7 @@
   [router state questions & {:keys [model task lang]}]
   (cond
     (some? model)
-    (decision (normalise-name model) (str "explicit model=" (py-repr model)) nil nil)
+    (decision (normalise-name router model) (str "explicit model=" (py-repr model)) nil nil)
 
     (some? task)
     (let [key (normalise-name (if (= "typed_decisions" (str/replace (str/lower-case (str task)) "-" "_"))
@@ -252,11 +311,14 @@
             (decision "english" "English Latin text" det workflow)))))))
 
 (defn predict
-  "Route, then answer every question in one forward pass on the chosen
-  checkpoint: the system-one map plus a \"routing\" key with the decision.
-  :constraints / :on-infeasible go to agent/system-one."
-  [router state questions & {:keys [model task lang constraints on-infeasible]}]
+  "Route, then answer every question on the chosen model: the system-one
+  map plus a \"routing\" key with the decision. :constraints /
+  :on-infeasible go to agent/system-one; :thinking / :thought to a thinker."
+  [router state questions & {:keys [model task lang constraints on-infeasible thinking thought]}]
   (let [d (route router state questions :model model :task task :lang lang)
         agent (load-model router (get d "model"))]
-    (assoc (ag/system-one agent state questions {:constraints constraints :on-infeasible on-infeasible})
+    (assoc (ag/system-one agent state questions
+                          (cond-> {:constraints constraints :on-infeasible on-infeasible}
+                            (some? thinking) (assoc :thinking thinking)
+                            (some? thought) (assoc :thought thought)))
            "routing" d)))

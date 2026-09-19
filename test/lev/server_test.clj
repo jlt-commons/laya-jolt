@@ -218,7 +218,7 @@
     (is (= 405 (first (call h (req :post "/v1/models")))))
     (let [[st b] (call h (req :get "/health"))]
       (is (= 200 st))
-      (is (= {"status" "ok" "model" "laya-rl-agent" "loaded" ["english"]
+      (is (= {"status" "ok" "model" "laya-rl-agent" "loaded" ["english"] "thinkers" []
               "workflows" ["demo" "email" "guard" "llm-router" "moderation" "triage"]} b)))))
 
 (deftest wire-order-is-preserved
@@ -246,7 +246,7 @@
             answer (curl (str "-X POST -H 'Content-Type: application/json' -H 'Authorization: Bearer k' -d '"
                              body "' " base "/v1/systemone"))
             denied (curl (str "-o /dev/null -w '%{http_code}' -X POST -d '{}' " base "/v1/systemone"))]
-        (is (= {"status" "ok" "model" "laya-rl-agent" "loaded" ["english"] "workflows" []}
+        (is (= {"status" "ok" "model" "laya-rl-agent" "loaded" ["english"] "thinkers" [] "workflows" []}
                (json/read-str (str/trim health))))
         (tu/answers-match (:system-one (tu/read-golden "readme")) (seq/json-str (dissoc (json/read-str (str/trim answer)) "routing")))
         (is (= "401" (str/trim denied))))
@@ -311,3 +311,63 @@
                 ["implies" ["is_phishing" true] ["needs_reply" false]]]
                (get-in b ["workflows" "email" "constraints"])))
         (is (= [] (get-in b ["workflows" "demo" "constraints"])))))))
+
+(deftest a-thinker-behind-the-api
+  (let [seen (atom [])
+        fake (fn [name cfg]
+               {:kind :thinker :name name :cfg (merge {:thinking true :max-think-tokens 64 :temperature 1.0 :top-p 0.95 :min-p 0.0 :seed 1
+                                                       :system "sys"} cfg)
+                :decide (fn [prompt options opts]
+                          (swap! seen conj {:options options :opts opts})
+                          {:logp (vec (map-indexed (fn [i _] (- (* 1.5 i) 0.5)) options)) :thought "hmm\n</think>" :tokens 3})
+                :count-tokens (fn [_] 5)})
+        rt (router/preloaded @agent "english" {:thinkers {"minicpm5" {:model "target/no-such.gguf" :thinking true}}
+                                               :thinker-loader fake})
+        h (srv/handler rt {:workflows @workflows})
+        base (json/read-str (readme-request))
+        post (fn [path body] (call h (req :post path :body (seq/json-str body))))]
+    (testing "model: <thinker> answers with the thinker's shapes and a thinking report"
+      (let [[st b] (post "/v1/systemone" (assoc base "model" "minicpm5"))]
+        (is (= 200 st) (pr-str b))
+        (is (= ["model" "answers" "usage" "thinking" "routing"] (keys b)))
+        (is (= "minicpm5" (get b "model")))
+        (is (= "minicpm5" (get-in b ["routing" "model"])))
+        (is (= ["type" "choice" "probabilities" "confidence"] (keys (get-in b ["answers" "department"]))))
+        (is (= 12 (get-in b ["usage" "output_tokens"])))
+        (is (true? (get-in b ["thinking" "enabled"])))
+        (is (every? #(= 64 (:think-max (:opts %))) @seen))))
+    (testing "thinking: false and thought: true per request"
+      (reset! seen [])
+      (let [[st b] (post "/v1/systemone" (assoc base "model" "minicpm5" "thinking" false "thought" true))]
+        (is (= 200 st))
+        (is (false? (get-in b ["thinking" "enabled"])))
+        (is (every? #(= 0 (:think-max (:opts %))) @seen))
+        (is (= "hmm\n</think>" (get-in b ["answers" "department" "thought"])))))
+    (testing "thinking / thought must be booleans, and mean nothing to a checkpoint"
+      (let [[st b] (post "/v1/systemone" (assoc base "model" "minicpm5" "thinking" "yes"))]
+        (is (= 422 st))
+        (is (= ["body" "thinking"] (get-in b ["detail" 0 "loc"]))))
+      (let [[st b] (post "/v1/systemone" (assoc base "model" "english" "thinking" true))]
+        (is (= 422 st))
+        (is (= ["body" "thinking"] (get-in b ["detail" 0 "loc"])))
+        (is (str/includes? (get-in b ["detail" 0 "msg"]) "thinker"))))
+    (testing "constraints apply to a thinker's answers too"
+      (let [[st b] (post "/v1/systemone" (assoc base "model" "minicpm5" "constraints" [["not" ["department" "other"]]]))]
+        (is (= 200 st))
+        (is (= ["model" "answers" "usage" "thinking" "constraints" "routing"] (keys b)))
+        (is (contains? (get-in b ["answers" "department"]) "decided"))))
+    (testing "workflows run on a thinker as well"
+      (let [[st b] (post "/v1/workflows/demo" {"model" "minicpm5" "thinking" false})]
+        (is (= 200 st))
+        (is (= "minicpm5" (get b "model")))))
+    (testing "the listing and health show thinkers"
+      (let [[_ b] (call h (req :get "/v1/models"))]
+        (is (= {"model" "target/no-such.gguf" "available" false "loaded" true "thinking" true}
+               (get-in b ["thinkers" "minicpm5"]))))
+      (let [[_ b] (call h (req :get "/health"))]
+        (is (= ["english"] (get b "loaded")))
+        (is (= ["minicpm5"] (get b "thinkers")))))
+    (testing "an unknown model still says so, and lists thinkers among the choices"
+      (let [[st b] (post "/v1/systemone" (assoc base "model" "gpt"))]
+        (is (= 422 st))
+        (is (str/includes? (get-in b ["detail" 0 "msg"]) "minicpm5"))))))
