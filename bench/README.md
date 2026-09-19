@@ -42,6 +42,7 @@ chat template.
 | **lev thinker** (MiniCPM5-2B Q8 in the binary), thinking off | 2.5B | 74.3% (107) | 71.4% | | 146 (Metal) |
 | **lev thinker**, thinking, sampled (temperature 1.0) | 2.5B | 91.0% (131) | 91.3% | | 5,388 mean, 3,926 median (Metal); 342 tokens |
 | **lev thinker**, thinking, greedy (the default) | 2.5B | **95.1% (137)** | 95.5% | | 4,716 mean, 3,084 median (Metal); 369 tokens |
+| [localjev](https://github.com/githubnext/localjev) + DiffusionGemma 26B-A4B 4-bit on oMLX 0.6.4 | 26B (4B active), 16.6 GB | 91.0% (131) | 90.0% | | 5,192 mean, 5,262 median (Metal) |
 
 The lev thinker is the same model and the same llama.cpp inside
 `lev-server` (`lev.think`): the prompt is built by lev, the thought is
@@ -52,6 +53,14 @@ calibrated shape the encoders give, where the llama-server harness parsed
 a free-form final line. Greedy beats a sampled thought by four points here
 and is reproducible; the two points to the free-form run are prompt and
 decoding noise on seven cases.
+
+localjev is a Bun bridge that turns the Jev request into a prompt asking
+an MLX-served chat model for a JSON probability vector (no thinking,
+temperature 0, retries on malformed JSON). Its probabilities are
+self-reported: 143 of the 144 answers here were one-hot, and all 13 wrong
+answers came with a probability of 0.9 or more, so its `confidence` says
+nothing. It needs oMLX and bun on Apple Silicon and a 16.6 GB model; it
+was slower than the 2.5B thinker in the lev binary and four points behind it.
 
 What the numbers say:
 
