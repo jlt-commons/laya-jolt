@@ -2,7 +2,7 @@
   "jolt prepare must reproduce the reference Python conversion byte for
   byte: golden/prepare.edn pins the size and zlib CRC-32 of every
   file the Python converter wrote for this checkpoint. Needs the checkpoint
-  (LAYA_HOME, default ../laya); writes to target/prepare-test and removes it."
+  (LEV_CHECKPOINTS, default ../laya); writes to target/prepare-test and removes it."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
@@ -12,16 +12,16 @@
 (def golden-dir
   (or (System/getenv "LEV_GOLDEN") "golden"))
 
-(def laya-home
-  (or (System/getenv "LAYA_HOME") "../laya"))
+(def home
+  (or (System/getenv "LEV_CHECKPOINTS") "../laya"))
 
 (deftest jolt-prepare-reproduces-python-conversion
-  (is (.exists (io/file laya-home "model.safetensors"))
-      (str "checkpoint not found under " laya-home " (set LAYA_HOME)"))
+  (is (.exists (io/file home "model.safetensors"))
+      (str "checkpoint not found under " home " (set LEV_CHECKPOINTS)"))
   (let [golden (:files (edn/read-string (slurp (str golden-dir "/prepare.edn"))))
         out "target/prepare-test"]
     (jolt.host/delete-tree! out)
-    (prep/convert laya-home out)
+    (prep/convert home out)
     (testing "every file matches the oracle's size and crc32"
       (is (= 209 (count golden)))
       (doseq [[fn {:keys [size crc32]}] golden]
@@ -44,7 +44,7 @@
     (is (= "{\"choice:2\" 1.9063563346862793}" (prep/config-value {"choice:2" 1.9063563346862793})))))
 
 (deftest missing-checkpoint-says-where-to-get-it
-  ;; the usual mistake: ../laya is a checkout of the GitHub laya repo (the
+  ;; the usual mistake: ../laya is a checkout of the package's GitHub repo (the
   ;; Python package), not the weights from the Hub
   (let [dir "target/prepare-test-empty"]
     (jolt.host/delete-tree! dir)
@@ -92,7 +92,7 @@
 
 (deftest jolt-prepare-reproduces-typed-decisions
   ;; same architecture and tokenizer as english, its own weights and config
-  (let [src (prep/checkpoint-dir laya-home "typed-decisions")]
+  (let [src (prep/checkpoint-dir home "typed-decisions")]
     (is (.exists (io/file src "model.safetensors"))
         (str "typed-decisions checkpoint not found under " src " (download the subfolder of the Hub repo)"))
     (let [golden (:files (edn/read-string (slurp (str golden-dir "/typed-decisions/prepare.edn"))))
@@ -129,7 +129,7 @@
   ;; mmBERT-base weights and config through the same converter; the
   ;; tokenizer.edn is this port's own sentencepiece format, checked by the
   ;; tokenizer cases in checkpoints_test rather than by the Python converter's CRC
-  (let [src (prep/checkpoint-dir laya-home "multilingual")]
+  (let [src (prep/checkpoint-dir home "multilingual")]
     (is (.exists (io/file src "model.safetensors"))
         (str "multilingual checkpoint not found under " src " (download the subfolder of the Hub repo)"))
     (let [golden (:files (edn/read-string (slurp (str golden-dir "/multilingual/prepare.edn"))))

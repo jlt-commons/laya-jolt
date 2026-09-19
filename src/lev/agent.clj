@@ -1,7 +1,7 @@
 (ns lev.agent
-  "Agent.system_one: state + typed questions -> calibrated typed answers.
-  Mirrors laya 0.3.0 agent.py (temperature calibration, entropy confidence,
-  the `action` extension)."
+  "system-one over an encoder: state + typed questions -> calibrated typed
+  answers, as the checkpoints' own Python package computes them
+  (temperature calibration, entropy confidence, the `action` extension)."
   (:require [clojure.edn :as edn]
             [lev.constraints :as c]
             [lev.model :as m]
@@ -29,14 +29,17 @@
 
 (defn load-agent
   "Load config + tokenizer + all weights from data-dir; `limits`
-  ({:max-len :head-max-len}, see with-limits) override the checkpoint's."
+  ({:max-len :head-max-len}, see with-limits) override the checkpoint's,
+  and its :name is what the answers report as \"model\" (the router passes
+  the checkpoint's name; alone, an agent is \"encoder\")."
   ([data-dir] (load-agent data-dir nil))
   ([data-dir limits]
    (let [manifest (edn/read-string (slurp (str data-dir "/manifest.edn")))
          cfg (edn/read-string (slurp (str data-dir "/config.edn")))
          tok (tk/load (str data-dir "/tokenizer.edn"))
-         agent {:cfg cfg :tok tok :w (m/load-weights manifest data-dir) :trained-max-len (:max-len cfg)}]
-     (if (seq limits) (with-limits agent limits) agent))))
+         agent {:kind :encoder :name (or (:name limits) "encoder")
+                :cfg cfg :tok tok :w (m/load-weights manifest data-dir) :trained-max-len (:max-len cfg)}]
+     (if (seq (dissoc limits :name)) (with-limits agent (dissoc limits :name)) agent))))
 
 (defn- qget
   "Question defs may carry keyword keys (Clojure literals) or string keys
@@ -114,8 +117,8 @@
   "One typed answer from the calibrated probabilities p (in option order;
   a noul's are [false true], so \"noul\" is p[1]). With a decision
   (`decided`, the label the constrained decoder settled on) it follows the
-  model's own answer field; `extra` ([k v] pairs, e.g. laya's action
-  head) closes the map. Without either, the map is laya 0.3.0's exactly."
+  model's own answer field; `extra` ([k v] pairs, e.g. the encoders' action
+  head) closes the map. Without either, the map is the Python package's exactly."
   [q p k decided extra]
   (let [decided-kv (when (some? decided) [["decided" decided]])]
     (seq/ordered-map
@@ -207,9 +210,9 @@
                     ["violations" (mapv #(c/canonical (nth nodes %)) (:violations sol))]]))
 
 (defmulti system-one*
-  "The engine behind system-one, by the agent's :kind: :laya (the
-  encoders, here) or :thinker (lev.think)."
-  (fn [agent _state _questions _opts] (:kind agent :laya)))
+  "The engine behind system-one, by the agent's :kind: :encoder (here)
+  or :thinker (lev.think)."
+  (fn [agent _state _questions _opts] (:kind agent :encoder)))
 
 (defn system-one
   "state + {qid -> qdef} -> Jev answer map (ordered to match json.dumps).
@@ -228,7 +231,7 @@
   ([agent state questions] (system-one agent state questions nil))
   ([agent state questions opts] (system-one* agent state questions opts)))
 
-(defmethod system-one* :laya
+(defmethod system-one* :encoder
   [agent state questions {:keys [constraints on-infeasible]}]
   (let [{:keys [cfg tok w]} agent
         qids (vec (keys questions))
@@ -279,7 +282,7 @@
                                            [["action" (array-map "act_probability" (round4 actp))]])])
                       prepared calibrated))]
     (seq/ordered-map
-     (concat [["model" "laya-rl-agent"]
+     (concat [["model" (:name agent "encoder")]
               ["answers" answers]
               ["usage" (array-map "input_tokens" n-tokens "output_tokens" 0)]]
              (when solution [["constraints" (constraints-report cs solution)]])))))

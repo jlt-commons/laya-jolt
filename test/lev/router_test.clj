@@ -1,5 +1,5 @@
 (ns lev.router-test
-  "laya router.py parity: which checkpoint a request goes to and why
+  "The upstream router.py's parity: which checkpoint a request goes to and why
   (golden/router.edn: Router.route decisions), plus lazy loading with LRU
   eviction and predict = system-one + routing."
   (:require [clojure.data.json :as json]
@@ -16,7 +16,10 @@
   (fn [name dir & _] (swap! log conj name) {:fake name :dir dir}))
 
 (deftest route-decisions-match-python
-  (doseq [{:keys [name state questions kw auto-task default decision]} (:cases @golden)]
+  ;; the one case that asks for the model by the Python package's own name
+  ;; is an alias lev dropped
+  (doseq [{:keys [name state questions kw auto-task default decision]} (:cases @golden)
+          :when (not (some-> (get kw "model") clojure.string/lower-case (clojure.string/includes? "laya")))]
     (let [r (router/make-router {:auto-task-detection auto-task :default default
                                  :loader (fake-loader (atom []))})
           want (json/read-str decision)
@@ -35,7 +38,9 @@
 
 (deftest names-and-aliases
   (let [aliases (json/read-str (:aliases @golden))]
-    (doseq [[alias canonical] aliases]
+    ;; the Python router also spelled its aliases with its own package name in
+    ;; front; lev dropped those
+    (doseq [[alias canonical] aliases :when (not (clojure.string/includes? alias "laya"))]
       (is (= canonical (router/normalise-name alias)) alias))
     (is (= "english" (router/normalise-name "  English ")))
     (is (= (json/read-str (:default-models @golden)) router/repos))
@@ -169,3 +174,42 @@
         (is (= 0 (:think-max (second @seen))))
         (is (= "t" (get out "model")))
         (is (= "t" (get-in out ["routing" "model"])))))))
+
+(deftest a-router-works-with-only-encoders-only-thinkers-or-both
+  (let [thinker (fn [name cfg] {:kind :thinker :name name :cfg cfg
+                                :decide (fn [_ options _] {:logp (vec (repeat (count options) -1.0)) :thought "" :tokens 0})
+                                :count-tokens (fn [_] 1)})
+        q {"q" {"type" "noul" "instructions" "?"}}]
+    (testing "thinkers only: the default is a thinker, and content routing lands on it when the routed encoder is not prepared"
+      (let [r (router/make-router {:models {"english" "target/not-prepared" "multilingual" "target/not-prepared"}
+                                   ;; any file that exists stands in for the GGUF: the fake loader never opens it
+                                   :thinkers {"t" {:model "deps.edn"}} :thinker-loader thinker
+                                   :default "t"
+                                   :loader router/load-prepared})]
+        (is (= "t" (:default r)))
+        (is (= "english" (get (router/route r "Refund me." {}) "model")) "the decision itself is unchanged")
+        (let [out (router/predict r "Refund me." q)]
+          (is (= "t" (get out "model")))
+          (is (= "t" (get-in out ["routing" "model"])))
+          (is (= "English Latin text; english is not prepared, using the default (t)" (get-in out ["routing" "reason"]))))
+        (is (= "t" (get-in (router/predict r "मुझसे दो बार" q) ["routing" "model"])) "non-Latin too")
+        (testing "an explicit unprepared encoder is still refused"
+          (is (thrown-with-msg? Exception #"not prepared" (router/predict r "hi" q :model "english"))))))
+    (testing "encoders only: no thinkers configured, a request for one is unknown"
+      (let [r (router/make-router {:models {"english" tu/data-dir}
+                                   :loader (fn [name & _] (if (= name "english") @tu/agent (throw (ex-info "no" {}))))})]
+        (is (= [] (router/thinker-names r)))
+        (is (thrown-with-msg? Exception #"unknown model" (router/predict r "hi" q :model "t")))
+        (is (= "english" (get-in (router/predict r "Refund me." q) ["routing" "model"])))))
+    (testing "nothing available: a clear error, not a crash"
+      (let [r (router/make-router {:models {"english" "target/not-prepared"} :loader router/load-prepared})]
+        (let [e (try (router/predict r "Refund me." q) nil (catch Exception e e))]
+          (is (= :model-unavailable (:type (ex-data e)))))))
+    (testing "both: the encoder answers the routed request, the thinker the explicit one, and an unprepared encoder is not replaced by another encoder"
+      (let [r (router/make-router {:models {"english" tu/data-dir "multilingual" "target/not-prepared"}
+                                   :thinkers {"t" {:model "deps.edn"}} :thinker-loader thinker
+                                   :loader (fn [name dir limits] (if (= name "english") @tu/agent (router/load-prepared name dir limits)))})]
+        (is (= "encoder" (get (router/predict r "Refund me." q) "model")) "the suite's agent was loaded alone")
+        (is (= "t" (get (router/predict r "Refund me." q :model "t") "model")))
+        (is (thrown-with-msg? Exception #"not prepared" (router/predict r "मुझसे दो बार" q))
+            "the default is english (an encoder): no fallback for a Hindi state")))))

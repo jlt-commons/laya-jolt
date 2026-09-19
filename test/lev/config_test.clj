@@ -95,3 +95,9 @@
            (cfg/thinkers {:opts {} :env {"LEV_THINKER" "/env.gguf"} :config {:thinkers {"a" {:model "/a.gguf"}}}}))))
   (testing "a thinker entry must name a model"
     (is (thrown-with-msg? Exception #"minicpm5.*:model" (cfg/thinkers {:opts {} :env {} :config {:thinkers {:minicpm5 {:thinking true}}}})))))
+
+(deftest encoders-from-config
+  (testing "config.edn :encoders names prepared data directories per checkpoint; else the :data root's layout"
+    (is (= {"english" "/models/en" "multilingual" "/models/ml"}
+           (cfg/encoders {:opts {} :env {} :config {:encoders {:english "/models/en" "multilingual" "/models/ml"}}})))
+    (is (= {} (cfg/encoders {:opts {} :env {} :config {}})))))

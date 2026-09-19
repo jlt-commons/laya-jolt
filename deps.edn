@@ -121,7 +121,7 @@
              (println "built: ./lev-server  (run: ./lev-server --data data --port 8080)"))}
 
   prepare
-  {:doc "convert the Laya checkpoint into data/ (LAYA_HOME / LEV_DATA, ~/.config/lev/config.edn :laya-home / :data, else ../laya and data)"
+  {:doc "convert the encoder checkpoints into data/ (LEV_CHECKPOINTS / LEV_DATA, ~/.config/lev/config.edn :checkpoints-home / :data, else ../laya and data)"
    :depends [kernels]
    :task (shell "jolt" "-M:prepare")}
 

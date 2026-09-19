@@ -18,9 +18,9 @@
 
 (def checkpoints
   "Every golden/<name>/ that exists (each needs data/<name>/ prepared), or
-  the names in LEV_CHECKPOINTS (comma-separated; empty means none), so CI
+  the names in LEV_TEST_CHECKPOINTS (comma-separated; empty means none), so CI
   can test one checkpoint per process."
-  (let [wanted (some-> (System/getenv "LEV_CHECKPOINTS") (clojure.string/split #",") set)]
+  (let [wanted (some-> (System/getenv "LEV_TEST_CHECKPOINTS") (clojure.string/split #",") set)]
     (vec (for [n ["typed-decisions" "multilingual"]
                :when (.exists (io/file tu/golden-dir n "cases.edn"))
                :when (or (nil? wanted) (contains? wanted n))]
@@ -39,7 +39,7 @@
   @(get agents n))
 
 (deftest checkpoints-are-prepared
-  (when (nil? (System/getenv "LEV_CHECKPOINTS"))
+  (when (nil? (System/getenv "LEV_TEST_CHECKPOINTS"))
     (is (= ["typed-decisions" "multilingual"] checkpoints) "both extra checkpoints have goldens"))
   (doseq [n checkpoints]
     (is (.exists (io/file tu/data-dir n "manifest.edn")) (str n " prepared"))))
@@ -123,11 +123,11 @@
           (is (= (into {} (map (fn [[k a]] [k (get a "choice")]) (get want "answers")))
                  (into {} (map (fn [[k a]] [k (get a "choice")]) (get got "answers")))))
           ;; float32 softmax in numpy vs doubles here: one unit in the last place
-          (is (tu/approx= 1.0001e-4 want got))))
+          (is (tu/approx= 1.0001e-4 (dissoc want "model") (dissoc got "model")))))
       (testing (str n ": email fan-out")
         (let [g (golden n "email_answers")
               bodies (mapv first (:clean (tu/read-golden "email")))]
           (doseq [{:keys [body-index state result]} (:cases g)]
             (let [want (json/read-str result)
                   got (json/read-str (seq/json-str (ag/system-one ag* state (:questions g))))]
-              (is (tu/approx= 1.0001e-4 want got) (str n " body " body-index)))))))))
+              (is (tu/approx= 1.0001e-4 (dissoc want "model") (dissoc got "model")) (str n " body " body-index)))))))))

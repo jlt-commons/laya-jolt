@@ -1,14 +1,14 @@
 name: setup
 description: >
   Everything a job needs before it can run the suite or build the binary:
-  system libs, the jolt compiler, the C kernels, the Laya checkpoint and the
+  system libs, the jolt compiler, the C kernels, the encoder checkpoints and the
   prepared data/ directory.
 
 inputs:
   target:
     description: jolt release asset target (aarch64-macos or x86_64-linux)
     required: true
-  laya-revision:
+  checkpoints-revision:
     # The golden traces and the CRCs in golden/*prepare.edn were dumped from
     # the checkpoints at this revision of convaiinnovations/laya (the first one
     # that bundles typed-decisions/ and multilingual/; the english files are
@@ -80,18 +80,18 @@ runs:
     # -v2 is the layout: bump it when the file list below changes, or a hit on
     # an older entry serves a directory missing the new files (it did, when
     # tokenizer_config.json and multilingual/ were added)
-    - name: Cache the Laya checkpoints
+    - name: Cache the encoder checkpoints
       id: checkpoint
       uses: actions/cache@v4
       with:
         path: ~/laya
-        key: laya-checkpoint-${{ inputs.laya-revision }}-v2
+        key: laya-checkpoint-${{ inputs.checkpoints-revision }}-v2
 
     # fetches whatever the cache did not have, then checks every model file
-    - name: Fetch the Laya checkpoints
+    - name: Fetch the encoder checkpoints (convaiinnovations/laya)
       shell: bash
       env:
-        REV: ${{ inputs.laya-revision }}
+        REV: ${{ inputs.checkpoints-revision }}
         # sha256 of each model.safetensors at that revision (its LFS blob id)
         SHA256_ENGLISH: 891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c
         SHA256_TYPED_DECISIONS: 4fa56de72383a9d3efa9cfa78955733c81b9fc8067a587ca4beb82c78107a24e
@@ -112,9 +112,9 @@ runs:
         echo "$SHA256_TYPED_DECISIONS  $HOME/laya/typed-decisions/model.safetensors" | shasum -a 256 -c -
         echo "$SHA256_MULTILINGUAL  $HOME/laya/multilingual/model.safetensors" | shasum -a 256 -c -
 
-    # every checkpoint under LAYA_HOME: data/, data/typed-decisions, data/multilingual
+    # every checkpoint under LEV_CHECKPOINTS: data/, data/typed-decisions, data/multilingual
     - name: Prepare data/
       shell: bash
       run: |
-        echo "LAYA_HOME=$HOME/laya" >> "$GITHUB_ENV"
-        LAYA_HOME="$HOME/laya" jolt prepare
+        echo "LEV_CHECKPOINTS=$HOME/laya" >> "$GITHUB_ENV"
+        LEV_CHECKPOINTS="$HOME/laya" jolt prepare

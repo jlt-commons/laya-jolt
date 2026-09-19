@@ -51,7 +51,10 @@
   per-head sgemm attention under Accelerate lands at 0.3143, and the ubuntu
   runners have given both."
   [want got & [msg]]
-  (is (approx= 1.0001e-4 (json/read-str want) (json/read-str got)) (or msg "answers within 1e-4")))
+  ;; the goldens carry the Python package's own model name; lev reports the
+  ;; checkpoint's name (english, ...) or "encoder" for an agent loaded alone
+  (is (approx= 1.0001e-4 (dissoc (json/read-str want) "model") (dissoc (json/read-str got) "model"))
+      (or msg "answers within 1e-4")))
 
 (defn relative-max-abs
   "max |a-b| over the first n values, as a fraction of max |b|: the bound

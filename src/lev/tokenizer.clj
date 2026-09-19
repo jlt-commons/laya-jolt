@@ -1,5 +1,5 @@
 (ns lev.tokenizer
-  "The two tokenizers in the Laya bundle, faithful to their tokenizer.json:
+  "The two tokenizers in the checkpoint bundle, faithful to their tokenizer.json:
 
   :byte-level (english, typed-decisions) - GPT-2 byte-level BPE: NFC
   normalize (ICU unorm2 via FFI), GPT-2 pre-tokenization (hand-written

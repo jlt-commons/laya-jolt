@@ -1,5 +1,5 @@
 (ns workflows.moderation
-  "Content safety and moderation (laya 0.3.0 presets.moderation_questions):
+  "Content safety and moderation (the upstream presets.moderation_questions):
   toxicity, harassment, threats, spam, severity. State: {\"post\" text}; a
   bare string is taken as the post.")
 

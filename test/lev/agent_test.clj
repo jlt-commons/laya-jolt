@@ -104,7 +104,7 @@
           ;; Python's calibrated softmax runs in float32, ours in doubles: a
           ;; probability within ~1e-7 of a 4-decimal boundary may round to
           ;; the neighbouring digit, so allow one unit in the last place.
-          (is (tu/approx= 1.0001e-4 want got) (str "body " body-index)))))))
+          (is (tu/approx= 1.0001e-4 (dissoc want "model") (dissoc got "model")) (str "body " body-index)))))))
 
 (deftest wide-choice-keeps-option-order
   (testing "past 8 options (and 8 questions) the answer maps must still follow input order"
@@ -131,12 +131,12 @@
         (is (= 0.0312 (get-in a ["is_phishing" "noul"])))
         (is (= 367 (get-in out ["usage" "input_tokens"])))))))
 
-(deftest answer-shape-is-laya-0-3
-  ;; laya 0.3.0 (Agent.system_one): "action" not "rl_agent", act_probability
-  ;; rounded, noul carries a confidence, model is "laya-rl-agent"
+(deftest answer-shape-is-the-upstream-packages
+  ;; Agent.system_one upstream: "action" not "rl_agent", act_probability
+  ;; rounded, noul carries a confidence; the model is the agent's name
   (let [out (ag/system-one @agent state questions)
         a (get out "answers")]
-    (is (= "laya-rl-agent" (get out "model")))
+    (is (= "encoder" (get out "model")) "loaded alone; through the router it is the checkpoint's name")
     (is (= ["type" "choice" "probabilities" "confidence" "action"] (keys (get a "department"))))
     (is (= ["type" "score" "legend" "probabilities" "confidence" "action"] (keys (get a "urgency"))))
     (is (= ["type" "noul" "confidence" "action"] (keys (get a "churn_risk"))))

@@ -1,6 +1,6 @@
 (ns lev.router
-  "Route a request to the Laya checkpoint best suited to it (the port of laya
-  0.3.0 router.py; decisions pinned by golden/router.edn).
+  "Route a request to the encoder checkpoint best suited to it (the port of
+  the checkpoints' Python router; decisions pinned by golden/router.edn).
 
   Three checkpoints, all in the Hub repo convaiinnovations/laya:
 
@@ -47,10 +47,9 @@
 
 (def aliases
   "Spellings people are likely to type."
-  {"en" "english" "laya" "english" "default" "english"
-   "multi" "multilingual" "ml" "multilingual" "laya-multilingual" "multilingual"
-   "typed" "typed-decisions" "typed_decisions" "typed-decisions"
-   "laya-typed-decisions" "typed-decisions" "decisions" "typed-decisions"})
+  {"en" "english" "default" "english"
+   "multi" "multilingual" "ml" "multilingual"
+   "typed" "typed-decisions" "typed_decisions" "typed-decisions" "decisions" "typed-decisions"})
 
 (def typed-decisions-workflows
   "Question-id signatures of the four typed-decisions workflows, used only
@@ -104,7 +103,7 @@
      (throw (ex-info (str "checkpoint " name " is not prepared (no " dir "/manifest.edn); "
                           "run jolt prepare for it or point :models at its data directory")
                      {:type :model-unavailable :model name :dir dir})))
-   (ag/load-agent dir limits)))
+   (ag/load-agent dir (assoc limits :name name))))
 
 (defn make-router
   "Options: :models {name data-dir} (default (default-models \"data\")),
@@ -122,7 +121,8 @@
   {:models (into (default-models (or data "data"))
                  (map (fn [[k v]] [(normalise-name k) v])) models)
    :max-loaded (max 1 (long max-loaded))
-   :default (normalise-name default)
+   ;; the default may be a thinker: resolved once the thinkers are known
+   :default (normalise-name {:thinkers (into {} (map (fn [[k v]] [(if (keyword? k) (name k) (str k)) v])) thinkers)} default)
    :auto-task-detection (boolean auto-task-detection)
    :limits (or limits {})
    :checkpoints (into {} (map (fn [[k v]] [(normalise-name k) v])) checkpoints)
@@ -130,6 +130,7 @@
    :thinkers (into {} (map (fn [[k v]] [(if (keyword? k) (name k) (str k)) v])) thinkers)
    :max-thinkers (max 1 (long max-thinkers))
    :thinker-loader (or thinker-loader (fn [name cfg] (think/thinker (assoc cfg :name name))))
+   :custom-thinker-loader (some? thinker-loader)
    :agents (atom {})
    :order (atom [])             ; least recently used first
    :thinker-agents (atom {})
@@ -161,7 +162,7 @@
   ([agent name opts]
    (let [r (make-router opts)
          key (normalise-name r name)]
-     (swap! (:agents r) assoc key agent)
+     (swap! (:agents r) assoc key (assoc agent :name key))
      (swap! (:order r) conj key)
      r)))
 
@@ -181,11 +182,12 @@
 
 (defn available?
   "Is this checkpoint's data directory prepared (or, for a thinker, its
-  GGUF on disk and the llm native built)?"
+  GGUF on disk and the llm native built — a router given its own
+  :thinker-loader vouches for the native itself)?"
   [router name]
   (let [key (normalise-name router name)]
     (if (thinker? router key)
-      (boolean (and (llm/available?)
+      (boolean (and (or (:custom-thinker-loader router) (llm/available?))
                     (.exists (clojure.java.io/file (:model (get (:thinkers router) key))))))
       (let [dir (get (:models router) key)]
         (boolean (and dir (.exists (clojure.java.io/file dir "manifest.edn"))))))))
@@ -310,12 +312,34 @@
             :else
             (decision "english" "English Latin text" det workflow)))))))
 
+(defn resolve-decision
+  "The decision `route` made, unless it names an encoder that is not
+  prepared, the request did not ask for it by name, and the default
+  model is an available thinker: then the thinker takes it (it reads any
+  language) and the reason says so. An encoder default is never a
+  substitute for another encoder (english cannot read what multilingual
+  was chosen for), and an explicit unavailable model stays as decided, so
+  loading it fails with the usual :model-unavailable."
+  [router d explicit?]
+  (let [chosen (get d "model")
+        default (:default router)]
+    (if (and (not explicit?)
+             (not (thinker? router chosen))
+             (not (available? router chosen))
+             (thinker? router default)
+             (available? router default))
+      (assoc d "model" default
+             "reason" (str (get d "reason") "; " chosen " is not prepared, using the default (" default ")"))
+      d)))
+
 (defn predict
   "Route, then answer every question on the chosen model: the system-one
   map plus a \"routing\" key with the decision. :constraints /
-  :on-infeasible go to agent/system-one; :thinking / :thought to a thinker."
+  :on-infeasible go to agent/system-one; :thinking / :thought to a thinker.
+  A content-routed model that is not available falls back to the default
+  (resolve-decision)."
   [router state questions & {:keys [model task lang constraints on-infeasible thinking thought]}]
-  (let [d (route router state questions :model model :task task :lang lang)
+  (let [d (resolve-decision router (route router state questions :model model :task task :lang lang) (some? model))
         agent (load-model router (get d "model"))]
     (assoc (ag/system-one agent state questions
                           (cond-> {:constraints constraints :on-infeasible on-infeasible}

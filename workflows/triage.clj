@@ -1,5 +1,5 @@
 (ns workflows.triage
-  "Support ticket triage (laya 0.3.0 presets.triage_questions): intent,
+  "Support ticket triage (the upstream presets.triage_questions): intent,
   urgency, frustration, refund, churn. State: {\"message\" text}; a bare
   string is taken as the message.")
 

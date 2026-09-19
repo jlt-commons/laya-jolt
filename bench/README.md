@@ -33,9 +33,9 @@ chat template.
 
 | model | params | authored144 | balanced | perturbations108 | ms / case |
 |---|---|---|---|---|---|
-| laya `english` (this port) | 395M | 61.1% (88) | 64.8% | 67.6% (73) | 117 (CPU) |
-| laya `typed-decisions` (this port) | 395M | 66.7% (96) | 68.1% | | 116 (CPU) |
-| laya `multilingual` (this port) | 307M | 59.0% (85) | 56.4% | | 48 (CPU) |
+| **lev encoder** `english` | 395M | 61.1% (88) | 64.8% | 67.6% (73) | 117 (CPU) |
+| **lev encoder** `typed-decisions` | 395M | 66.7% (96) | 68.1% | | 116 (CPU) |
+| **lev encoder** `multilingual` | 307M | 59.0% (85) | 56.4% | | 48 (CPU) |
 | von-1.0, NLI zero-shot | 395M | 76.4% (110) | 76.4% | 73.1% (79) | 160 (CPU, torch) |
 | MiniCPM5-2B Q8 through llama-server, direct answer (grammar) | 2.5B | 73.6% (106) | 71.8% | | 566 (CPU) / 89 (Metal) |
 | MiniCPM5-2B Q8 through llama-server, thinking, free-form answer | 2.5B | **97.2% (140)** | 97.6% | | 3,938 mean, 2,759 median (Metal); ~9,800 mean, 8,050 median (CPU, 24-case sample); ~300 tokens of thought |
@@ -70,18 +70,18 @@ What the numbers say:
   of reasoning it gets 140/144, at 3 s a case on the GPU and ~10 s on the
   CPU.
 - von-1.0 is the same ModernBERT-large encoder this port runs, with an NLI
-  head instead of laya's marker head, one pair sequence per option instead
-  of one sequence per question. +15 points over laya `english` on this set
-  for ~1.4x the time. laya under-predicts the abstaining option
+  head instead of the encoders' marker head, one pair sequence per option
+  instead of one sequence per question. +15 points over the `english`
+  encoder on this set for ~1.4x the time. The encoder under-predicts the abstaining option
   (`insufficient` 18 times against 36 expected); von's failures are
   concentrated in rule application under perturbation (10/36).
-- The two encoders fail on different cases: 41 von-right/laya-wrong, 19 the
+- The two encoders fail on different cases: 41 von-right/english-wrong, 19 the
   other way, 15 both wrong, and the thinker gets all 15 of those. A
-  confidence gate over laya's top-2 margin at 0.5 sends 92 of 144 cases up
+  confidence gate over the encoder's top-2 margin at 0.5 sends 92 of 144 cases up
   to the thinker and lands at 88.9%; over von's at 0.5, 92 up and 93.1%.
   On this set almost everything is low-confidence; on routine traffic the
   gate would pass most cases through at encoder speed.
 
-The Jev benchmark from the other session (24/64 laya vs 60/64 hosted Jev)
+The Jev benchmark from the other session (24/64 for the encoder vs 60/64 hosted Jev)
 is the same shape: a generative model with a reasoning budget against a
 single-pass encoder.

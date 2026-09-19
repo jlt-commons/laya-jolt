@@ -1,6 +1,7 @@
 (ns lev.lang
-  "Dependency-free language/script detection used to route between Laya
-  checkpoints (the port of laya 0.3.0 lang.py, pinned by golden/lang.edn).
+  "Dependency-free language/script detection used to route between the
+  encoder checkpoints (the port of their Python package's lang.py, pinned
+  by golden/lang.edn).
 
   Routing needs one decision: is this English Latin text, or something the
   English checkpoint cannot read? The English checkpoint collapses to near

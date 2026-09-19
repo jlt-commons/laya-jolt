@@ -5,10 +5,11 @@ calibrated probabilities — as one Clojure binary on
 [jolt](https://github.com/jolt-lang/jolt) (Chez Scheme, no JVM), with two
 kinds of model behind the same API:
 
-- **the encoders**: the Laya decision models (ModernBERT-large /
-  mmBERT-base with a decision head; `convaiinnovations/laya`, three
-  checkpoints), one forward pass, ~100 ms a call on a laptop, the Python
-  package's answers reproduced to the fourth decimal;
+- **the encoders**: ModernBERT-large / mmBERT-base with a decision head
+  (the `convaiinnovations/laya` checkpoints, three of them), one forward
+  pass for all of a call's questions, ~100 ms on a laptop CPU, calibrated
+  probabilities, the checkpoints' own Python package reproduced to the
+  fourth decimal;
 - **a thinker**: any GGUF chat model through llama.cpp, linked into the
   binary. It reads the state and the question, thinks, and its candidate
   answers are scored by their token log probabilities. Seconds a
@@ -17,24 +18,42 @@ kinds of model behind the same API:
   against the encoders' 61–76%.
 
 A request names the model (`"model": "english"` or `"minicpm5"`) or is
-routed by content to a checkpoint; a confidence gate can answer on the
-encoder and escalate only what it is unsure about to the thinker.
-Constraints tie a call's questions together; workflows package a use
-case; von's composable patterns (route, composite score, two-stage
-choice) and its `decide`/`judge`/`rate` are there as a library and over
-HTTP.
+routed by content to an encoder; a confidence gate can answer on the
+encoder and escalate only what it is unsure about to the thinker. Either
+kind can be configured alone: a box with only encoders serves them, a box
+with only a thinker routes everything to it. Constraints tie a call's
+questions together; workflows package a use case; von's composable
+patterns (route, composite score, two-stage choice) and its
+`decide`/`judge`/`rate` are there as a library and over HTTP.
+
+Which one, and when — measured on a 120-case in-distribution set (AG
+News / BoolQ / SST-5, the trio localjev's bake-off uses) and on von's
+adversarial authored144 (details in [bench/](bench/README.md)):
+
+| | AG News | BoolQ | SST-5 | authored144 | ms per question |
+|---|---|---|---|---|---|
+| encoder `english` | **97.5%** | 72.5% | 27.5% | 61% | **125** (CPU) |
+| thinker, thinking off | 82.5% | 70.0% | 27.5% | 74% | 152 (GPU) |
+| thinker, thinking | 85.0% | **90.0%** | **37.5%** | **95%** | 3,000 (GPU) |
+
+The encoder is the fast path: on routing-style traffic it beats the 2.5B
+model answering at once, at a fraction of the cost on a CPU, batching a
+whole workflow into one forward, with confidence that means something
+(its calibration is fitted; the gate relies on it). The thinker earns
+its seconds on the cases that need a deduction or an abstention.
 
 The encoders are f32 end to end: F16 checkpoint weights are widened once,
 during `prepare`, so the numerics match the torch CPU oracle. (The project
 was `laya-jolt` until 2026-09-19; the namespaces are `lev.*`, the binary
-`lev-server`, the config `~/.config/lev`, the environment `LEV_*`; the
-checkpoints and the answers' `"model": "laya-rl-agent"` keep the model's
-name.)
+`lev-server`, the config `~/.config/lev`, the environment `LEV_*`. The
+checkpoints keep their Hub name; the answers' `"model"` is the name of the
+model that answered — `english`, `multilingual`, `typed-decisions` or a
+thinker's — where the Python package printed its own.)
 
 ## Getting the checkpoints
 
-The weights are not in this repo and not in the GitHub `laya` repo either
-(that one is the Python package). They live on the Hugging Face Hub:
+The weights are not in this repo and not in the Python package's GitHub
+repo either. They live on the Hugging Face Hub:
 **https://huggingface.co/convaiinnovations/laya**, one repo bundling three
 checkpoints:
 
@@ -73,7 +92,7 @@ done
 or clone the whole model repo with git-lfs (`git lfs install && git clone
 https://huggingface.co/convaiinnovations/laya ../laya`), or with the Hub CLI
 (`hf download convaiinnovations/laya --local-dir ../laya`). Put it anywhere
-and point `LAYA_HOME` at it (or `jolt -M:prepare --laya DIR --out data`).
+and point `LEV_CHECKPOINTS` at it (or `jolt -M:prepare --checkpoints DIR --out data`).
 `jolt prepare` converts every checkpoint it finds there into the same layout
 under the data root (`data/`, `data/typed-decisions`, `data/multilingual`);
 `--model NAME` converts one. It refuses a root that lacks any of the five
@@ -118,7 +137,7 @@ oracle (english at the root, `golden/typed-decisions/` and
 
 `jolt -M:test` runs everything against whatever is prepared under `data/`;
 `jolt -M:test lev.checkpoints-test` runs one namespace, and
-`LEV_CHECKPOINTS=typed-decisions` (comma-separated, empty for none)
+`LEV_TEST_CHECKPOINTS=typed-decisions` (comma-separated, empty for none)
 restricts the extra-checkpoint parity suite, which is how CI tests one
 checkpoint per process. `jolt -M:run demo` prints the quickstart answer
 JSON: the `:system-one` value in `golden/readme.edn` (to the fourth
@@ -143,27 +162,39 @@ or a literal with at most 8 entries); a hash-map would reorder them.
 Every entry point (`jolt prepare`, `jolt -M:run`, `jolt -M:serve`, the
 binary) resolves its settings the same way: **CLI flag > environment
 variable > `config.edn` > default**. `config.edn` lives in
-`$LEV_CONFIG_DIR`, else `$XDG_CONFIG_HOME/laya`, else `~/.config/lev`:
+`$LEV_CONFIG_DIR`, else `$XDG_CONFIG_HOME/lev`, else `~/.config/lev`:
 
 ```clojure
-{:data "/Users/me/models/laya-data"      ; prepared data root: what jolt prepare writes and everything else loads
- :laya-home "/Users/me/models/laya"      ; the Hub checkpoints jolt prepare reads
+{:data "/Users/me/models/lev-data"       ; prepared data root: what jolt prepare writes and everything else loads
+ :checkpoints-home "/Users/me/models/laya"  ; the Hub checkpoints jolt prepare reads
+ :encoders {"english" "/Users/me/models/lev-data"}   ; prepared encoders by name (else the :data layout); leave one out to not serve it
+ :thinkers {"minicpm5" {:model "/Users/me/models/MiniCPM5-2B-Q8_0.gguf"}}   ; generative models (see Thinkers); none = encoders only
  :workflow-dirs ["/Users/me/src/decisions/workflows"]   ; extra workflow directories
  :port 8080 :host "127.0.0.1" :api-key "s3cret"        ; server defaults
- :max-loaded 2 :default-model "english"                 ; checkpoints kept resident; the one loaded at startup
+ :max-loaded 2 :max-thinkers 1                          ; encoders / thinkers kept resident
+ :default-model "english"                               ; loaded at startup; content routing's fallback (an encoder or a thinker)
  :auto-task-detection false                             ; route typed-decisions question sets to that checkpoint
  :max-len 768 :head-max-len 192                         ; sequence limits for every checkpoint (see Context)
  :checkpoints {"multilingual" {:max-len 2048}}}         ; ... and per checkpoint, which wins
 ```
 
+A server needs at least one model of either kind and serves whatever is
+available: with no thinker, `model` names only encoders; with no prepared
+encoder and a thinker as `:default-model`, every request (including the
+content-routed ones) goes to the thinker; a request for a model that is
+configured but not available (no data directory, no GGUF, the llm native
+not built) is a 503, and `GET /v1/models` says which is which.
+
 | setting | flag | environment | `config.edn` | default |
 |---|---|---|---|---|
 | prepared data root | `--data DIR` | `LEV_DATA` | `:data` | `data` |
-| checkpoints (prepare) | `--laya DIR` | `LAYA_HOME` | `:laya-home` | `../laya` |
+| checkpoints (prepare) | `--checkpoints DIR` | `LEV_CHECKPOINTS` | `:checkpoints-home` | `../laya` |
+| encoders served | — | — | `:encoders {"name" dir}` | the `:data` layout |
+| thinkers served | `--thinker PATH.gguf` (as `thinker`) | `LEV_THINKER` | `:thinkers {"name" {...}}` | none |
 | workflow dirs | `--workflows DIR[:DIR]` | `LEV_WORKFLOWS` | `:workflow-dirs` (adds) | see below |
 | server | `--port` `--host` `--api-key` | `PORT` `LEV_HOST` `LEV_API_KEY` | `:port` `:host` `:api-key` | `8080` `127.0.0.1` none |
-| resident checkpoints | `--max-loaded N` | `LAYA_MAX_LOADED` | `:max-loaded` | `1` |
-| startup / fallback checkpoint | `--default-model NAME` | `LAYA_DEFAULT_MODEL` | `:default-model` | `english` |
+| resident encoders / thinkers | `--max-loaded N` / `--max-thinkers N` | `LEV_MAX_LOADED` / `LEV_MAX_THINKERS` | `:max-loaded` / `:max-thinkers` | `1` / `1` |
+| startup / fallback model | `--default-model NAME` | `LEV_DEFAULT_MODEL` | `:default-model` | `english` |
 | typed-decisions by question ids | `--auto-task-detection` | — | `:auto-task-detection` | off |
 | sequence limits | `--max-len N` `--head-max-len N` | `LEV_MAX_LEN` `LEV_HEAD_MAX_LEN` | `:max-len` `:head-max-len`, `:checkpoints {"name" {…}}` | the checkpoint's own (`rl_agent_config.json`) |
 | goldens (`--self-test`) | `--golden DIR` | `LEV_GOLDEN` | `:golden` | `golden` |
@@ -191,7 +222,7 @@ unavailable and a request for it is a 503.
 
 ## Context: what the model sees
 
-Laya has no sessions, turns or memory. Every call is one stateless forward
+The encoders have no sessions, turns or memory. Every call is one stateless forward
 pass, and the context is exactly the `state` you pass; the server caches
 loaded weights, nothing else. For each question, `build-sequence` lays out
 
@@ -358,7 +389,7 @@ equivalent of) and `security` from von:
 | `triage` | `{"message"}` or a string | intent, urgency, frustration, refund requested, churn risk |
 | `guard` | `{"prompt"}` or a string | jailbreak, prompt injection, sensitive data, harm severity, topic |
 | `moderation` | `{"post"}` or a string | toxic, harassment, threat, spam, severity |
-| `llm-router` | `{"request"}` or a string | difficulty, domain, needs tools, is sensitive (routing *your* LLM traffic; `lev.router` picks Laya checkpoints) |
+| `llm-router` | `{"request"}` or a string | difficulty, domain, needs tools, is sensitive (routing *your* LLM traffic; `lev.router` picks lev models) |
 | `security` | `{"event"}` or a string | event type, active threat, severity (von's security preset), with constraints: benign is no threat, a threat is at least elevated |
 
 ## HTTP API
@@ -371,7 +402,7 @@ and adds the Python package's `Router` and presets. Routes are dispatched by
 POST /v1/systemone        Authorization: Bearer <key>   (only if a key is configured)
 {"state": <string|object|array>, "questions": {"<id>": {...}}, "constraints"?: [...], "on_infeasible"?: "min_violations"|"raise",
  "model"?: ..., "lang"?: ..., "task"?: ...}
--> {"model": "laya-rl-agent", "answers": {"<id>": {...}}, "usage": {"input_tokens": n, "output_tokens": 0},
+-> {"model": "english", "answers": {"<id>": {...}}, "usage": {"input_tokens": n, "output_tokens": 0},
     "constraints"?: {"feasible": bool, "decoder": ..., "exact": bool, "violations": [...]},
     "routing": {"model": "english", "repo": "convaiinnovations/laya", "reason": "English Latin text",
                 "detection": {...}, "workflow": null}}
@@ -383,7 +414,7 @@ POST /v1/workflows/<name> {"input": <anything the workflow's state fn takes>, "o
                              are added to the workflow's own
 GET  /v1/models           -> {"default": ..., "max_loaded": n, "models": {"english": {"repo", "data", "available", "loaded"}, ...}}
 GET  /v1/workflows        -> {"workflows": {"email": {"description", "file", "questions": [ids], "constraints": [...], "options": bool}, ...}}
-GET  /health              -> {"status": "ok", "model": "laya-rl-agent", "loaded": [...], "workflows": [...]}
+GET  /health              -> {"status": "ok", "model": "lev", "loaded": [...], "thinkers": [...], "workflows": [...]}
 ```
 
 Questions and answers have the shapes the Python `Agent.system_one` uses
@@ -406,9 +437,10 @@ POST /v1/patterns/two-stage-choice  {"state", "taxonomy": {category: {option: de
 
 `escalate` also works on a workflow request; constraints then decide over
 the merged answers.
-`model` is either absent (or the engine's own name, `laya-rl-agent`) to
-route by content, or a checkpoint name / alias (`english`, `multilingual`, `typed-decisions`, `en`,
-`ml`, ...) to pick one; `lang` (`"de"`, `"en-GB"`) and `task`
+`model` is either absent (or `lev`, or a TypeSafe SDK's default
+`jev-latest` / `jev-preview`) to route by content, a checkpoint name /
+alias (`english`, `multilingual`, `typed-decisions`, `en`, `ml`, ...) or a
+thinker's name to pick one; `lang` (`"de"`, `"en-GB"`) and `task`
 (`"typed_decisions"`) are the Router's other hints, in the same precedence
 as upstream: model > task > detected workflow (opt-in) > lang > detected
 script/language > default. Every answer says what was chosen and why under
@@ -596,7 +628,11 @@ as one batch of up to 8 rows (padded to the longest, masked), sharing every
 matmul; the intermediates are one workspace per call, ~260 MB at 8 x 512.
 
 Speed, `english` on a 10-core M-series laptop, Accelerate, single call:
-one question is ~95 ms at 55 tokens and ~350 ms at 512, linear in between;
+one question is ~95 ms at 55 tokens and ~350 ms at 512, linear in
+between (it was quadratic — 4.8 s at 512 — until attention went through
+per-head sgemm with the sliding layers scoring only their 129-key band;
+the softmax, LayerNorm and GELU kernels are vectorized and a call's
+questions share one batched forward);
 the bundled `demo` (4 questions, ~90 tokens each) takes ~290 ms and
 `email` on a 3,000-character body (5 questions at the 512 cap) ~1.5 s. The
 matmuls are Accelerate's (multi-core); attention (heads x query blocks),

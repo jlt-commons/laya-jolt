@@ -1,5 +1,5 @@
 (ns lev.prepare
-  "jolt prepare: convert the Laya checkpoint into data/ (the port of the
+  "jolt prepare: convert an encoder checkpoint into data/ (the port of the
   reference Python converter; golden/prepare.edn pins its output and
   test/lev/prepare_test.clj checks this one reproduces it).
 
@@ -10,7 +10,7 @@
     {vocab merges specials added}, plus the sentencepiece fields for mmBERT
   - encoder/config.json + rl_agent_config.json -> <out>/config.edn
 
-  Usage: jolt prepare  (task)  or  jolt -M:prepare [--laya DIR] [--out DIR]"
+  Usage: jolt prepare  (task)  or  jolt -M:prepare [--checkpoints DIR] [--out DIR]"
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
@@ -214,23 +214,24 @@
 (def hub-url "https://huggingface.co/convaiinnovations/laya")
 
 (def checkpoint-files
-  "What a Laya checkpoint directory must contain (the Hub repo's layout)."
+  "What a checkpoint directory must contain (the Hub repo's layout)."
   ["model.safetensors" "tokenizer/tokenizer.json" "tokenizer/tokenizer_config.json"
    "encoder/config.json" "rl_agent_config.json"])
 
 (defn check-checkpoint!
   "Throw {:type :checkpoint-missing} naming the absent files and where to get
-  them. The usual mistake is pointing at a checkout of the GitHub laya repo,
+  them. The usual mistake is pointing at a checkout of the GitHub repo of the
+  Python package,
   which is the Python package, not the weights."
-  [laya-home]
-  (let [missing (vec (remove #(.exists (io/file laya-home %)) checkpoint-files))]
+  [home]
+  (let [missing (vec (remove #(.exists (io/file home %)) checkpoint-files))]
     (when (seq missing)
-      (throw (ex-info (str "no Laya checkpoint under " laya-home " (missing "
+      (throw (ex-info (str "no checkpoint under " home " (missing "
                            (str/join ", " missing) ").\n"
-                           "The weights live on the Hub, not in the GitHub laya repo: download "
+                           "The weights live on the Hub (convaiinnovations/laya), not in the package's GitHub repo: download "
                            hub-url " into that directory (README, \"Getting the checkpoint\"), "
-                           "or point LAYA_HOME / --laya at where you put it.")
-                      {:type :checkpoint-missing :laya-home laya-home :missing missing})))))
+                           "or point LEV_CHECKPOINTS / --checkpoints at where you put it.")
+                      {:type :checkpoint-missing :checkpoints-home home :missing missing})))))
 
 (def checkpoints
   "Checkpoint name -> its subfolder in the Hub bundle (english is the root).
@@ -238,9 +239,9 @@
   (seq/ordered-map [["english" ""] ["multilingual" "multilingual"] ["typed-decisions" "typed-decisions"]]))
 
 
-(defn checkpoint-dir [laya-home name]
+(defn checkpoint-dir [home name]
   (let [sub (get checkpoints name)]
-    (if (= sub "") laya-home (str laya-home "/" sub))))
+    (if (= sub "") home (str home "/" sub))))
 
 (defn out-dir [out name]
   (let [sub (get checkpoints name)]
@@ -253,30 +254,30 @@
   "What to convert: [{:name :src :out} ...]. With no names, the root
   (english, required) plus every subfolder that is there; with names, exactly
   those, each of which must be there."
-  [laya-home out names]
+  [home out names]
   (doseq [n names]
     (when-not (contains? checkpoints n)
       (throw (ex-info (str "unknown checkpoint " (pr-str n) "; choose one of " (str/join ", " (keys checkpoints)))
                       {:type :unknown-model :model n :known (vec (keys checkpoints))}))))
   (if (seq names)
     (vec (for [n names]
-           (let [src (checkpoint-dir laya-home n)]
+           (let [src (checkpoint-dir home n)]
              (check-checkpoint! src)
              {:name n :src src :out (out-dir out n)})))
-    (do (check-checkpoint! laya-home)
+    (do (check-checkpoint! home)
         (vec (for [[n _] checkpoints
-                   :let [src (checkpoint-dir laya-home n)]
+                   :let [src (checkpoint-dir home n)]
                    :when (present? src)]
                {:name n :src src :out (out-dir out n)})))))
 
 (defn convert
-  "Run the whole conversion of the checkpoint under laya-home into out."
-  [laya-home out]
-  (check-checkpoint! laya-home)
-  (let [entries (convert-weights (str laya-home "/model.safetensors") out)]
+  "Run the whole conversion of the checkpoint under home into out."
+  [home out]
+  (check-checkpoint! home)
+  (let [entries (convert-weights (str home "/model.safetensors") out)]
     (write-manifest entries out)
-    (write-tokenizer (str laya-home "/tokenizer/tokenizer.json") (str laya-home "/tokenizer/tokenizer_config.json") out)
-    (write-config (str laya-home "/encoder/config.json") (str laya-home "/rl_agent_config.json") out)
+    (write-tokenizer (str home "/tokenizer/tokenizer.json") (str home "/tokenizer/tokenizer_config.json") out)
+    (write-config (str home "/encoder/config.json") (str home "/rl_agent_config.json") out)
     (println (format "config.edn written; %d tensors, total %.2f GB"
                      (count entries)
                      (/ (* 4.0 (reduce + (map (fn [[_ shape _]] (reduce * 1 shape)) entries))) 1e9)))
@@ -293,25 +294,25 @@
 
 (defn convert-bundle
   "Convert the checkpoints `plan` lists. Answers {name entries}."
-  [laya-home out names]
+  [home out names]
   (into {}
-        (for [{:keys [name src out]} (plan laya-home out names)]
+        (for [{:keys [name src out]} (plan home out names)]
           (do (println (str "== " name ": " src " -> " out))
               [name (convert src out)]))))
 
 (defn -main
-  "jolt -M:prepare [--laya DIR] [--out DIR] [--model NAME]. Falls back to
-  LAYA_HOME / LEV_DATA, then config.edn :laya-home / :data, then ../laya and
+  "jolt -M:prepare [--checkpoints DIR] [--out DIR] [--model NAME]. Falls back to
+  LEV_CHECKPOINTS / LEV_DATA, then config.edn :checkpoints-home / :data, then ../laya and
   data. Without --model every checkpoint present under DIR is converted
   (english at the root, multilingual/ and typed-decisions/ when downloaded)."
   [& args]
   (let [opts (cfg/parse-args args)
         ctx (cfg/context opts)
-        laya-home (cfg/setting ctx "--laya" "LAYA_HOME" :laya-home "../laya")
+        home (cfg/setting ctx "--checkpoints" "LEV_CHECKPOINTS" :checkpoints-home "../laya")
         out (cfg/setting ctx "--out" "LEV_DATA" :data "data")
         model (get opts "--model")
         names (when (and (string? model) (not= model "all")) [model])]
-    (try (convert-bundle laya-home out names)
+    (try (convert-bundle home out names)
          (catch Exception e
            (if (#{:checkpoint-missing :unknown-model} (:type (ex-data e)))
              (do (binding [*out* *err*] (println "jolt prepare:" (ex-message e)))

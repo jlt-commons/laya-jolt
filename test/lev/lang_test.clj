@@ -1,5 +1,5 @@
 (ns lev.lang-test
-  "laya lang.py parity: script detection, the Latin-script language guess and
+  "The upstream lang.py's parity: script detection, the Latin-script language guess and
   state flattening, against golden/lang.edn (analyse() on ~35 texts)."
   (:require [clojure.test :refer [deftest is testing]]
             [lev.lang :as lang]

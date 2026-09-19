@@ -1,5 +1,5 @@
 (ns workflows.email
-  "Email triage workflow, mirroring laya 0.3.0 email.py and
+  "Email triage workflow, mirroring the upstream email.py and
   presets.email_questions: clean raw emails into a compact state and answer
   a ready-made set of email questions.
 

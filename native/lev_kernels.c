@@ -1,4 +1,4 @@
-/* lev_kernels.c — elementwise/reduction kernels for the laya inference
+/* lev_kernels.c — elementwise/reduction kernels for the lev encoder inference
  * engine. Matmuls go to cblas_sgemm (Accelerate / OpenBLAS); everything
  * torch does outside a gemm lives here. Layout convention: row-major,
  * tensors are [rows x cols] contiguous, masks are uint8 (1 = allowed).

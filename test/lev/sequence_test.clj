@@ -71,7 +71,7 @@
     (is (= ks (keys (seq/ordered-map (map vector ks (range 30))))))
     (is (= "{\"z\": 1, \"a\": 2}" (seq/json-str (seq/ordered-map [["z" 1] ["a" 2]]))))))
 
-(deftest render-options-like-laya-0-3
+(deftest render-options-like-the-upstream-package
   (testing "only None and \"\" mean no description; 0, False, [] are values"
     (is (= ["a" "b: false" "c: 0" "d: 0.0" "e" "f: []" "g: 1"]
            (seq/render-options {:t "choice"

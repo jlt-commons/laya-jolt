@@ -7,7 +7,7 @@
                                \"constraints\"? [...], \"on_infeasible\"?,
                                \"model\"? \"lang\"? \"task\"?
                                \"thinking\"? bool, \"thought\"? bool}
-                              -> {\"model\" \"laya-rl-agent\", \"answers\" {...},
+                              -> {\"model\" \"english\", \"answers\" {...},
                                   \"usage\" {...}, \"thinking\"? {...},
                                   \"constraints\"? {...}, \"routing\" {...}}
                               with \"escalate\" {\"model\" thinker, \"threshold\"?
@@ -27,10 +27,11 @@
                               -> systemone answer + \"workflow\" + the built \"state\"
     GET  /v1/models           the checkpoints: repo, data dir, prepared, loaded
     GET  /v1/workflows        the loaded workflows: description, question ids
-    GET  /health              {\"status\" \"ok\", \"model\" \"laya-rl-agent\",
+    GET  /health              {\"status\" \"ok\", \"model\" \"lev\",
                                \"loaded\" [...], \"workflows\" [...]}
 
-  `model` is absent (or the engine's own name, laya-rl-agent) to route by
+  `model` is absent (or the engine's own name, lev, or a Jev SDK's default
+  jev-latest / jev-preview) to route by
   content, a checkpoint name / alias (english, multilingual,
   typed-decisions, en, ml, ...) to pick one, or a thinker's name (the
   generative models config.edn :thinkers / --thinker declare; lev.think)
@@ -76,10 +77,11 @@
             [ruuter.core :as ruuter])
   (:gen-class))
 
-(def default-model "laya-rl-agent")
+(def engine-name "lev")
 
-;; the engine's own names: "route for me", not a checkpoint choice
-(def ^:private engine-names #{"laya-rl-agent" "rl-agent"})
+;; the engine's own name, and the defaults a TypeSafe SDK sends: "route for
+;; me", not a model choice
+(def ^:private engine-names #{"lev" "jev-latest" "jev-preview"})
 
 ;; --- responses ------------------------------------------------------------------
 
@@ -361,7 +363,7 @@
       not-found)))
 
 (defn- health [rt workflows]
-  (json-response 200 (seq/ordered-map [["status" "ok"] ["model" default-model]
+  (json-response 200 (seq/ordered-map [["status" "ok"] ["model" engine-name]
                                        ["loaded" (router/loaded rt)]
                                        ["thinkers" (router/loaded-thinkers rt)]
                                        ["workflows" (vec (sort (keys workflows)))]])))
@@ -468,59 +470,64 @@
   (adapter/stop-server server))
 
 (defn self-test
-  "Run the README quickstart through the handler and compare with the
-  json.dumps(Agent.system_one(...)) pinned in <golden-dir>/readme.edn, plus
-  the tokenizer paths a release build has miscompiled before. Answers
-  [[name ok? detail] ...]. The test suite runs interpreted; this is what
-  proves the AOT binary computes the same thing. With a router whose
-  first available thinker can load, one question also goes through it
-  without thinking: the proof that llama.cpp is linked in and runs."
+  "What a built binary proves before it ships. With the english encoder
+  prepared: the README quickstart through the handler against the
+  json.dumps(Agent.system_one(...)) pinned in <golden-dir>/readme.edn,
+  plus the tokenizer paths a release build has miscompiled before. With
+  a thinker available: one question through it without thinking, the
+  proof that llama.cpp is linked in and runs. Answers [[name ok? detail]
+  ...]; a setup without one kind of model skips that kind's rows. The
+  test suite runs interpreted; this is what checks the AOT binary."
   [agent golden-dir]
   (let [rt (if (router/router? agent) agent (router/preloaded agent))
-        agent (router/load-model rt "english")
-        h (handler rt {})
         golden (fn [name] (edn/read-string {:readers {'laya/omap seq/ordered-map}}
                                            (slurp (str golden-dir "/" name ".edn"))))
         cases (golden "cases")
-        want (:system-one (golden "readme"))
-        body (seq/json-str (seq/ordered-map [["state" (:readme-state cases)]
-                                             ["model" default-model]
-                                             ["questions" (:readme-questions cases)]]))
-        resp (h {:request-method :post :uri "/v1/systemone" :headers {} :body body})
-        ;; the python JSON plus a routing key; probabilities are compared to
-        ;; one unit in the fourth decimal, since a value on a rounding
-        ;; boundary can land either side under a different BLAS (byte
-        ;; identity under Accelerate is the test suite's job)
-        got (json/read-str (str/trim (:body resp)))
-        approx (fn approx [a b]
-                 (cond (and (number? a) (number? b)) (<= (Math/abs (- (double a) (double b))) 1.0001e-4)
-                       (and (map? a) (map? b)) (and (= (set (keys a)) (set (keys b)))
-                                                    (every? (fn [[k v]] (approx v (get b k))) a))
-                       (and (sequential? a) (sequential? b)) (and (= (count a) (count b))
-                                                                  (every? true? (map approx a b)))
-                       :else (= a b)))
-        answer-ok (and (approx (json/read-str want) (dissoc got "routing"))
-                       (= "english" (get-in got ["routing" "model"])))
-        tok (:tok agent)
-        tok-cases (:tok-cases cases)
-        tok-golden (:cases (golden "tok"))
-        tok-ok (every? (fn [[i c]] (= (get tok-golden (str i)) (tk/encode tok c)))
-                       (map-indexed vector tok-cases))
-        nfc-ok (= (apply str (repeat 300 "क़"))
-                  (tk/nfc (apply str (repeat 300 "क़"))))]
-    (vec (remove nil?
-    [["README quickstart answer matches the Python engine" answer-ok
-      (when-not answer-ok (str "got " (seq/json-str got)))]
-     ["tokenizer reproduces golden/tok.edn" tok-ok nil]
-     ["NFC expansion path" nfc-ok nil]
-     (when-let [name (first (filter #(router/available? rt %) (router/thinker-names rt)))]
-       (let [[ok detail] (try (let [out (router/predict rt (:readme-state cases)
-                                                        (select-keys (:readme-questions cases) ["is_phishing"])
-                                                        :model name :thinking false)]
-                                [(contains? #{true false} (< 0.5 (get-in out ["answers" "is_phishing" "noul"])))
-                                 (str name ": " (seq/json-str (get-in out ["answers" "is_phishing"])))])
-                              (catch Exception e [false (ex-message e)]))]
-         [(str "the thinker answers (" (lev.llm/version) ")") ok detail]))]))))
+        encoder-rows
+        (when (router/available? rt "english")
+          (let [agent (router/load-model rt "english")
+                h (handler rt {})
+                want (:system-one (golden "readme"))
+                body (seq/json-str (seq/ordered-map [["state" (:readme-state cases)]
+                                                     ["model" "english"]
+                                                     ["questions" (:readme-questions cases)]]))
+                resp (h {:request-method :post :uri "/v1/systemone" :headers {} :body body})
+                ;; the python JSON plus a routing key; probabilities are compared to
+                ;; one unit in the fourth decimal, since a value on a rounding
+                ;; boundary can land either side under a different BLAS
+                got (json/read-str (str/trim (:body resp)))
+                approx (fn approx [a b]
+                         (cond (and (number? a) (number? b)) (<= (Math/abs (- (double a) (double b))) 1.0001e-4)
+                               (and (map? a) (map? b)) (and (= (set (keys a)) (set (keys b)))
+                                                            (every? (fn [[k v]] (approx v (get b k))) a))
+                               (and (sequential? a) (sequential? b)) (and (= (count a) (count b))
+                                                                          (every? true? (map approx a b)))
+                               :else (= a b)))
+                ;; the golden carries the Python package's own model name; lev
+                ;; reports the checkpoint's
+                answer-ok (and (approx (dissoc (json/read-str want) "model") (dissoc got "routing" "model"))
+                               (= "english" (get got "model"))
+                               (= "english" (get-in got ["routing" "model"])))
+                tok (:tok agent)
+                tok-golden (:cases (golden "tok"))
+                tok-ok (every? (fn [[i c]] (= (get tok-golden (str i)) (tk/encode tok c)))
+                               (map-indexed vector (:tok-cases cases)))
+                nfc-ok (= (apply str (repeat 300 "क़"))
+                          (tk/nfc (apply str (repeat 300 "क़"))))]
+            [["README quickstart answer matches the Python engine" answer-ok
+              (when-not answer-ok (str "got " (seq/json-str got)))]
+             ["tokenizer reproduces golden/tok.edn" tok-ok nil]
+             ["NFC expansion path" nfc-ok nil]]))
+        thinker-row
+        (when-let [name (first (filter #(router/available? rt %) (router/thinker-names rt)))]
+          (let [[ok detail] (try (let [out (router/predict rt (:readme-state cases)
+                                                           (select-keys (:readme-questions cases) ["is_phishing"])
+                                                           :model name :thinking false)]
+                                   [(contains? #{true false} (< 0.5 (get-in out ["answers" "is_phishing" "noul"])))
+                                    (str name ": " (seq/json-str (get-in out ["answers" "is_phishing"])))])
+                                 (catch Exception e [false (ex-message e)]))]
+            [(str "the thinker answers (" (lev.llm/version) ")") ok detail]))]
+    (vec (concat encoder-rows (when thinker-row [thinker-row])))))
 
 (defn -main
   "jolt -M:serve [--data DIR] [--port N] [--host ADDR] [--api-key KEY]
@@ -542,6 +549,7 @@
         arg (fn [flag env key default] (cfg/setting ctx flag env key default))
         data-dir (arg "--data" "LEV_DATA" :data "data")
         rt (router/make-router {:data data-dir
+                                :models (cfg/encoders ctx)
                                 :max-loaded (Long/parseLong (str (arg "--max-loaded" "LEV_MAX_LOADED" :max-loaded "1")))
                                 :max-thinkers (Long/parseLong (str (arg "--max-thinkers" "LEV_MAX_THINKERS" :max-thinkers "1")))
                                 :thinkers (cfg/thinkers ctx)
@@ -553,18 +561,28 @@
                                 :checkpoints (into {} (map (fn [n] [n (cfg/limits ctx n)])) router/names)})
         log (fn [& xs] (binding [*out* *err*] (apply println "lev:" xs)))
         t0 (System/nanoTime)
-        _ (log "loading" (:default rt) "from" (get (:models rt) (:default rt)) "...")
-        agent (try (router/load-model rt (:default rt))
-                   (catch Exception e
-                     (if (= :model-unavailable (:type (ex-data e)))
-                       (do (log (ex-message e)) (System/exit 1))
-                       (throw e))))
-        _ (log (format "%d tensors loaded in %.1fs; max_len %d%s, head_max_len %d"
-                       (count (:w agent)) (/ (- (System/nanoTime) t0) 1e9)
-                       (:max-len (:cfg agent))
-                       (if (not= (:max-len (:cfg agent)) (:trained-max-len agent))
-                         (str " (trained " (:trained-max-len agent) ")") "")
-                       (:head-max-len (:cfg agent))))]
+        every-model (concat router/names (router/thinker-names rt))
+        _ (when-not (some #(router/available? rt %) every-model)
+            (log "no model is available: no prepared encoder under" data-dir "(jolt prepare) and no thinker"
+                 "(config.edn :thinkers or --thinker PATH.gguf)")
+            (System/exit 1))
+        ;; the default is loaded at startup when it is there; a setup with only
+        ;; the other kind of model still serves (a request for the default is a 503)
+        _ (if (router/available? rt (:default rt))
+            (do (log "loading" (:default rt)
+                     (if (router/thinker? rt (:default rt))
+                       (str "(" (:model (get (:thinkers rt) (:default rt))) ")")
+                       (str "from " (get (:models rt) (:default rt)))) "...")
+                (let [agent (router/load-model rt (:default rt))]
+                  (if (router/thinker? rt (:default rt))
+                    (log (format "thinker %s loaded in %.1fs" (:default rt) (/ (- (System/nanoTime) t0) 1e9)))
+                    (log (format "%d tensors loaded in %.1fs; max_len %d%s, head_max_len %d"
+                                 (count (:w agent)) (/ (- (System/nanoTime) t0) 1e9)
+                                 (:max-len (:cfg agent))
+                                 (if (not= (:max-len (:cfg agent)) (:trained-max-len agent))
+                                   (str " (trained " (:trained-max-len agent) ")") "")
+                                 (:head-max-len (:cfg agent)))))))
+            (log "default model" (:default rt) "is not available; the others are served"))]
     (if (get opts "--self-test")
       (let [results (self-test rt (arg "--golden" "LEV_GOLDEN" :golden "golden"))]
         (doseq [[name ok? detail] results]

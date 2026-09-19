@@ -13,7 +13,7 @@
             [lev.sequence :as seq]))
 
 (defn- canned-agent
-  "A :laya-shaped agent whose system-one answers from a table {qid p},
+  "A canned agent whose system-one answers from a table {qid p},
   p in answer order ([false true] for a noul)."
   [name table]
   {:kind :canned :name name :table table})

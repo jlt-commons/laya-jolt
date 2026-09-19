@@ -1,5 +1,5 @@
 (ns workflows.email-test
-  "laya email.py parity. golden/email.edn holds clean_email_body in/out
+  "The upstream email.py's parity. golden/email.edn holds clean_email_body in/out
   pairs and json.dumps of email_state / email_questions from the Python
   module, so the port is compared byte for byte."
   (:require [clojure.edn :as edn]

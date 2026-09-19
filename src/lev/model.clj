@@ -1,5 +1,5 @@
 (ns lev.model
-  "ModernBERT-large encoder + the Laya decision head, f32, verified layer by
+  "ModernBERT-large encoder + the checkpoints' decision head, f32, verified layer by
   layer against the torch golden traces in golden/layers.edn.
 
   Encoder layer (modeling_modernbert.py; norm_bias=attention_bias=false):

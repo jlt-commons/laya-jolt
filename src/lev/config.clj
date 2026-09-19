@@ -5,7 +5,8 @@
 
   config.edn keys:
     :data            prepared data root (jolt prepare --out)
-    :laya-home       checkpoint directory jolt prepare reads
+    :checkpoints-home  the Hub checkpoint directory jolt prepare reads
+    :encoders        {\"name\" dir} prepared data directories, overriding the :data layout
     :workflow-dirs   extra directories of workflow .clj files
     :port :host :api-key :max-loaded :default-model :auto-task-detection
                      server defaults
@@ -145,3 +146,10 @@
         one (cond (string? cli) cli from-env from-env)]
     (cond-> from-config
       one (assoc "thinker" {:model one}))))
+
+(defn encoders
+  "Prepared encoder data directories named in config.edn :encoders
+  ({name dir}, names as keywords or strings), overriding the :data root's
+  layout entry by entry; {} when none are named."
+  [{:keys [config]}]
+  (into {} (map (fn [[k v]] [(if (keyword? k) (clojure.core/name k) (str k)) (str v)])) (:encoders config)))

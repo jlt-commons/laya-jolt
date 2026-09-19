@@ -1,5 +1,5 @@
 (ns workflows.guard
-  "Real-time LLM input guardrails (laya 0.3.0 presets.guard_questions):
+  "Real-time LLM input guardrails (the upstream presets.guard_questions):
   jailbreak, prompt injection, sensitive data, harm severity, topic. State:
   {\"prompt\" text}; a bare string is taken as the prompt.")
 

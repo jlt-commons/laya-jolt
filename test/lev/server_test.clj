@@ -27,7 +27,7 @@
 (defn- readme-request []
   (let [cases (tu/read-golden "cases")]
     (seq/json-str (seq/ordered-map [["state" (:readme-state cases)]
-                                    ["model" "laya-rl-agent"]
+                                    ["model" "lev"]
                                     ["questions" (:readme-questions cases)]]))))
 
 (deftest systemone-reproduces-the-python-answer
@@ -47,10 +47,10 @@
         one-q (seq/ordered-map [["state" "Refund me."]
                                 ["questions" (seq/ordered-map [["q" (get-in base ["questions" "churn_risk"])]])]])]
     (testing "absent, or the engine's own name: routed by content, with the decision attached"
-      (doseq [body [one-q (assoc one-q "model" "laya-rl-agent") (assoc one-q "model" "rl-agent")]]
+      (doseq [body [one-q (assoc one-q "model" "lev") (assoc one-q "model" "jev-latest")]]
         (let [[st b] (call h (req :post "/v1/systemone" :body (seq/json-str body)))]
           (is (= 200 st))
-          (is (= "laya-rl-agent" (get b "model")))
+          (is (= "english" (get b "model")))
           (is (= ["model" "answers" "usage" "routing"] (keys b)))
           (is (= "english" (get-in b ["routing" "model"])))
           (is (= "English Latin text" (get-in b ["routing" "reason"]))))))
@@ -64,7 +64,7 @@
         (is (= 200 st))
         (is (= "explicit lang='en-GB'" (get-in b ["routing" "reason"])))))
     (testing "an unknown model is a 422 naming the choices"
-      (let [[st b] (call h (req :post "/v1/systemone" :body (seq/json-str (assoc one-q "model" "jev-latest"))))]
+      (let [[st b] (call h (req :post "/v1/systemone" :body (seq/json-str (assoc one-q "model" "gpt-4"))))]
         (is (= 422 st))
         (is (= ["body" "model"] (get-in b ["detail" 0 "loc"])))
         (is (str/includes? (get-in b ["detail" 0 "msg"]) "multilingual"))))
@@ -218,7 +218,7 @@
     (is (= 405 (first (call h (req :post "/v1/models")))))
     (let [[st b] (call h (req :get "/health"))]
       (is (= 200 st))
-      (is (= {"status" "ok" "model" "laya-rl-agent" "loaded" ["english"] "thinkers" []
+      (is (= {"status" "ok" "model" "lev" "loaded" ["english"] "thinkers" []
               "workflows" ["demo" "email" "guard" "llm-router" "moderation" "security" "triage"]} b)))))
 
 (deftest wire-order-is-preserved
@@ -246,7 +246,7 @@
             answer (curl (str "-X POST -H 'Content-Type: application/json' -H 'Authorization: Bearer k' -d '"
                              body "' " base "/v1/systemone"))
             denied (curl (str "-o /dev/null -w '%{http_code}' -X POST -d '{}' " base "/v1/systemone"))]
-        (is (= {"status" "ok" "model" "laya-rl-agent" "loaded" ["english"] "thinkers" [] "workflows" []}
+        (is (= {"status" "ok" "model" "lev" "loaded" ["english"] "thinkers" [] "workflows" []}
                (json/read-str (str/trim health))))
         (tu/answers-match (:system-one (tu/read-golden "readme")) (seq/json-str (dissoc (json/read-str (str/trim answer)) "routing")))
         (is (= "401" (str/trim denied))))
@@ -388,7 +388,7 @@
       (let [[st b] (post "/v1/systemone" (assoc base "escalate" {"threshold" 0.6 "model" "slow"}))]
         (is (= 200 st) (pr-str b))
         (is (= ["model" "answers" "usage" "escalation" "routing"] (keys b)))
-        (is (= "laya-rl-agent" (get b "model")))
+        (is (= "english" (get b "model")))
         (is (= "billing" (get-in b ["answers" "department" "choice"])) "0.9+: the encoder's")
         (is (= 0.0312 (get-in b ["answers" "is_phishing" "noul"])) "0.97 sure: the encoder's")
         (is (contains? (set (get-in b ["escalation" "escalated"])) "churn_risk") "0.57 sure: escalated")

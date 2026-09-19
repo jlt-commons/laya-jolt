@@ -112,7 +112,7 @@
   (if (string? state) state (json-str state)))
 
 (defn- no-description?
-  "laya 0.3.0: only None and \"\" mean \"no description\"; 0 and False are
+  "As the Python package: only None and \"\" mean \"no description\"; 0 and False are
   legitimate criterion values (the old `not v` test dropped them)."
   [v]
   (or (nil? v) (= v "")))

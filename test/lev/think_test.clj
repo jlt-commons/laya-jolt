@@ -72,7 +72,7 @@
         a (get out "answers")]
     (is (= ["model" "answers" "usage" "thinking"] (keys out)))
     (is (= "fake" (get out "model")))
-    (testing "choice: argmax of the softmaxed scores, probabilities in option order, laya's confidence"
+    (testing "choice: argmax of the softmaxed scores, probabilities in option order, the encoders' confidence"
       (is (= ["type" "choice" "probabilities" "confidence"] (keys (get a "department"))))
       (is (= "billing" (get-in a ["department" "choice"])))
       (is (= ["billing" "technical" "other"] (keys (get-in a ["department" "probabilities"]))))

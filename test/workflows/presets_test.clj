@@ -1,5 +1,5 @@
 (ns workflows.presets-test
-  "The bundled workflows that port laya 0.3.0 presets.py: their question
+  "The bundled workflows that port the upstream presets.py: their question
   maps must serialize byte-for-byte like json.dumps of the Python presets
   (golden/presets.edn)."
   (:require [clojure.test :refer [deftest is testing]]
@@ -18,8 +18,8 @@
       (is (= (get @golden golden-key) (seq/json-str (wf/questions (get @bundled name))))))))
 
 (deftest security-preset-from-von
-  ;; not a laya preset: von's security_preset (github.com/wfzyx/von), with
-  ;; constraints laya's presets have no equivalent of
+  ;; not an upstream preset: von's security_preset (github.com/wfzyx/von),
+  ;; with constraints the upstream presets have no equivalent of
   (let [w (get @bundled "security")]
     (is (= ["event_type" "is_threat" "severity"] (keys (wf/questions w))))
     (is (= 5 (count (get-in (wf/questions w) ["event_type" "criteria"]))))
