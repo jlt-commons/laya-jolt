@@ -7,7 +7,7 @@
   instructions and every option, thinks (or not), is handed the answer
   prefix, and each option is then scored by the log probability of its
   tokens — a softmax over those is the answer's distribution. On the
-  authored144 set (bench/) MiniCPM5-2B answers 97% with thinking and
+  authored144 set (bench/) MiniCPM5-2B answers 95% with thinking and
   74% without, against 61-76% for the encoders.
 
   A thinker is data: {:kind :thinker :name :cfg :decide :count-tokens},
@@ -22,11 +22,14 @@
 
 (def defaults
   {:thinking true
-   :max-think-tokens 1024
+   :max-think-tokens 2048
    :n-ctx 4096
    :n-gpu-layers -1
    :threads 0
-   :temperature 1.0
+   ;; greedy: on authored144 a sampled thought (temperature 1.0, MiniCPM's
+   ;; general setting) lands at 91%, the greedy one at 95%, and greedy is
+   ;; reproducible
+   :temperature 0.0
    :top-p 0.95
    :min-p 0.0
    :seed 42

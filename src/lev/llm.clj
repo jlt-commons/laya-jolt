@@ -40,7 +40,7 @@
 (def defaults
   {:n-ctx 4096 :n-gpu-layers -1 :threads 0 :n-seq-max 32
    :temperature 1.0 :top-p 0.95 :min-p 0.0 :seed 42
-   :think-max 1024 :think-end "</think>" :answer-prefix "ANSWER: " :answer-end "<|im_end|>"})
+   :think-max 2048 :think-end "</think>" :answer-prefix "\n\nANSWER: " :answer-end "<|im_end|>"})
 
 (defn load
   "Load a GGUF: {:n-ctx (4096) :n-gpu-layers (-1 = all) :threads (0 =
@@ -68,8 +68,12 @@
 
 (defn chat-prompt
   "ChatML for `messages` ({:role :content}, string keys accepted) through
-  the assistant turn. opts :thinking (true: the open thought tag; false:
-  the closed empty thought, so the model answers at once; nil: neither)."
+  the assistant turn. opts :thinking (true: the open thought tag, for
+  `decide` to close; false: the closed empty thought, so the model
+  answers at once; nil: neither). Either way what follows the closing
+  tag is the answer prefix (\"\\n\\nANSWER: \" by default), so a decided
+  answer is always scored after `</think>\\n\\nANSWER: `, the shape the
+  template produces."
   [_m messages {:keys [thinking]}]
   (let [turn (fn [{:keys [role content] :as msg}]
                (str "<|im_start|>" (or role (get msg "role")) "\n" (or content (get msg "content")) "<|im_end|>\n"))]
@@ -77,7 +81,7 @@
          "<|im_start|>assistant\n"
          (case thinking
            true "<think>\n"
-           false "<think>\n\n</think>\n\n"
+           false "<think>\n\n</think>"
            ""))))
 
 (defn generate

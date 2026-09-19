@@ -100,7 +100,7 @@
   (testing "off in the call: the prompt closes the thought, no budget, no tokens"
     (let [calls (atom [])
           out (think/system-one (fake-thinker calls scores) state (select-keys questions ["churn_risk"]) {:thinking false})]
-      (is (str/ends-with? (:prompt (first @calls)) "<think>\n\n</think>\n\n"))
+      (is (str/ends-with? (:prompt (first @calls)) "<think>\n\n</think>"))
       (is (= 0 (:think-max (:opts (first @calls)))))
       (is (= 0 (get-in out ["usage" "output_tokens"])))
       (is (= {"enabled" false "tokens" 0 "max_tokens" 0} (get out "thinking")))))

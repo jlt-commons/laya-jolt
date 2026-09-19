@@ -14,6 +14,8 @@ settle the question.
 ```
 jolt -M bench/authored144.clj                              # english
 jolt -M bench/authored144.clj --model typed-decisions
+jolt -M bench/authored144.clj --model minicpm5 --thinking false   # a configured thinker (config.edn :thinkers, or --thinker PATH as `thinker`)
+jolt -M bench/authored144.clj --model minicpm5                    # thinking
 jolt -M bench/authored144.clj --file bench/data/perturbations108.jsonl --out results.jsonl
 ```
 
@@ -35,8 +37,21 @@ chat template.
 | laya `typed-decisions` (this port) | 395M | 66.7% (96) | 68.1% | | 116 (CPU) |
 | laya `multilingual` (this port) | 307M | 59.0% (85) | 56.4% | | 48 (CPU) |
 | von-1.0, NLI zero-shot | 395M | 76.4% (110) | 76.4% | 73.1% (79) | 160 (CPU, torch) |
-| MiniCPM5-2B Q8, direct answer | 2.5B | 73.6% (106) | 71.8% | | 566 (CPU) / 89 (Metal) |
-| MiniCPM5-2B Q8, thinking | 2.5B | **97.2% (140)** | 97.6% | | 3,938 mean, 2,759 median (Metal); ~9,800 mean, 8,050 median (CPU, 24-case sample); ~300 tokens of thought |
+| MiniCPM5-2B Q8 through llama-server, direct answer (grammar) | 2.5B | 73.6% (106) | 71.8% | | 566 (CPU) / 89 (Metal) |
+| MiniCPM5-2B Q8 through llama-server, thinking, free-form answer | 2.5B | **97.2% (140)** | 97.6% | | 3,938 mean, 2,759 median (Metal); ~9,800 mean, 8,050 median (CPU, 24-case sample); ~300 tokens of thought |
+| **lev thinker** (MiniCPM5-2B Q8 in the binary), thinking off | 2.5B | 74.3% (107) | 71.4% | | 146 (Metal) |
+| **lev thinker**, thinking, sampled (temperature 1.0) | 2.5B | 91.0% (131) | 91.3% | | 5,388 mean, 3,926 median (Metal); 342 tokens |
+| **lev thinker**, thinking, greedy (the default) | 2.5B | **95.1% (137)** | 95.5% | | 4,716 mean, 3,084 median (Metal); 369 tokens |
+
+The lev thinker is the same model and the same llama.cpp inside
+`lev-server` (`lev.think`): the prompt is built by lev, the thought is
+decoded greedily until `</think>`, then `\n\nANSWER: ` is forced and each
+option is scored by the log probability of its tokens (plus the end-of-turn
+token), a softmax over those being the answer's probabilities — the same
+calibrated shape the encoders give, where the llama-server harness parsed
+a free-form final line. Greedy beats a sampled thought by four points here
+and is reproducible; the two points to the free-form run are prompt and
+decoding noise on seven cases.
 
 What the numbers say:
 
