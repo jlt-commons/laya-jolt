@@ -1,4 +1,5 @@
-{:tok-cases [
+{:model "english"
+ :tok-cases [
   "Which department should handle this email?"
   " choice question: invoices, payments, refunds"
   "  leading double space and\ttab"
@@ -82,5 +83,6 @@
   "z\n\n\n\n\nq" ["z" "\n\n\n\n" "\n" "q"]
   "\u000d\nThe" ["\u000d" "\n" "The"]
 }
+ :specials #laya/omap [["cls" 50281] ["sep" 50282] ["mask" 50284] ["pad" 50283] ["unk" 50280] ["mask-token" "[MASK]"]]
  :readme-state #laya/omap [["from" "customer@acme.com"] ["subject" "Duplicate billing on March invoice #4411"] ["body" "Hi team, we were billed twice for March. Please refund the duplicate before Friday or we will cancel our plan."]]
  :readme-questions #laya/omap [["department" #laya/omap [["type" "choice"] ["instructions" "Which department should handle this email?"] ["criteria" #laya/omap [["billing" "invoices, payments, refunds"] ["technical" "bugs, outages, integrations"] ["sales" "pricing, contracts, demos"] ["other" "everything else"]]]]] ["urgency" #laya/omap [["type" "score"] ["instructions" "How urgent is this request?"] ["criteria" ["not urgent" "soon" "critical deadline or blocking issue"]]]] ["churn_risk" #laya/omap [["type" "noul"] ["instructions" "Does the user threaten to cancel or switch to a competitor?"]]] ["is_phishing" #laya/omap [["type" "noul"] ["instructions" "Is this email a phishing or scam attempt?"]]]]}

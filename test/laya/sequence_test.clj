@@ -71,12 +71,25 @@
     (is (= ks (keys (seq/ordered-map (map vector ks (range 30))))))
     (is (= "{\"z\": 1, \"a\": 2}" (seq/json-str (seq/ordered-map [["z" 1] ["a" 2]]))))))
 
-(deftest render-options-falsy-values
-  (testing "python `if not v`: None, False, 0, 0.0, '', empty collections"
-    (is (= ["a" "b" "c" "d" "e" "f" "g: 1"]
+(deftest render-options-like-laya-0-3
+  (testing "only None and \"\" mean no description; 0, False, [] are values"
+    (is (= ["a" "b: false" "c: 0" "d: 0.0" "e" "f: []" "g: 1"]
            (seq/render-options {:t "choice"
                                 :crit (array-map "a" nil "b" false "c" 0 "d" 0.0
                                                  "e" "" "f" [] "g" 1)}))))
+  (testing "render_criterion: structured criteria are compact JSON, ensure_ascii off"
+    (is (= "{\"desc\": \"caf\u00e9 x\", \"n\": 1}" (seq/render-criterion {"desc" "caf\u00e9 x" "n" 1})))
+    (is (= "[1, 2.5, \"z\"]" (seq/render-criterion [1 2.5 "z"])))
+    (is (= "null" (seq/render-criterion nil)))
+    (is (= "plain" (seq/render-criterion "plain")))
+    (is (= ["level 0: {\"label\": \"low\"}" "level 1: plain" "level 2: 0" "level 3: null"]
+           (seq/render-options {:t "score" :crit [{"label" "low"} "plain" 0 nil]})))
+    (is (= ["false: [\"a\", \"b\"]" "true: {\"k\": \"v\"}"]
+           (seq/render-options {:t "noul" :crit {"true" {"k" "v"} "false" ["a" "b"]}})))
+    (is (= ["false: false" "true: 0"]
+           (seq/render-options {:t "noul" :crit {"true" 0 "false" false}})))
+    (is (= ["false: no, the statement does not hold" "true: yes, the statement holds"]
+           (seq/render-options {:t "noul" :crit {"true" "" "false" nil}}))))
   (testing "score levels and noul defaults"
     (is (= ["level 0: low" "level 1: high"]
            (seq/render-options {:t "score" :crit ["low" "high"]})))
@@ -99,10 +112,11 @@
           (is (= (:qtype gold) (seq/qtypes (:t q))) qid)))))
   (testing "the branches the quickstart never takes (golden/sequences.edn)"
     (let [cases (tu/read-golden "sequences")]
-      (is (= 12 (count cases)))
-      (doseq [[name {:keys [state question ids markers]}] cases]
+      (is (= 17 (count cases)))
+      (doseq [[name {:keys [state question ids markers options]}] cases]
         (let [q (ag/to-internal question)
               [got-ids got-markers] (seq/build-sequence @tok state q 512 192)]
+          (is (= options (seq/render-options q)) name)
           (is (= (mapv long ids) got-ids) name)
           (is (= (mapv long markers) got-markers) name)))
       (testing "what those cases pin down"

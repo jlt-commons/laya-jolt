@@ -1,5 +1,5 @@
 (ns laya.email
-  "Email helpers, mirroring email_utils.py: clean raw emails into a compact
+  "Email helpers, mirroring laya 0.3.0 email.py (+ presets.email_questions): clean raw emails into a compact
   state and a ready-made set of email questions.
 
   Jev-style models lose accuracy on long, noisy state, and the model reads
@@ -203,7 +203,7 @@
   (array-map "billing" "invoices, payments, refunds"
              "technical" "bugs, outages, integrations"
              "sales" "pricing, demos, new purchases"
-             "account" "login, access, profile changes"
+             "security" "phishing, scams, account compromise"
              "hr" "hiring, leave, payroll"
              "other" "none of the above"))
 
@@ -225,11 +225,8 @@
                                "criteria" (array-map "true" "phishing, scam, or fraud"
                                                      "false" "a legitimate email"))
       "urgency" (array-map "type" "score"
-                           "instructions" "How urgent is the issue described in `body`?"
+                           "instructions" "How urgent is the request in `body`?"
                            "criteria" ["no time pressure" "needs attention soon"
                                        "blocking issue or hard deadline"])
       "needs_reply" (array-map "type" "noul"
-                               "instructions" "Does the sender expect a reply?")
-      "sentiment" (array-map "type" "score"
-                             "instructions" "What is the sender's tone in `body`?"
-                             "criteria" ["angry or very negative" "negative" "neutral" "positive"])))))
+                               "instructions" "Does the sender expect a reply?")))))

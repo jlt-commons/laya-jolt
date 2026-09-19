@@ -1,6 +1,7 @@
 (ns laya.agent
-  "RLAgent.system_one: state + typed questions -> calibrated typed answers.
-  Mirrors rl_agent_api.py (temperature calibration, jev confidence)."
+  "Agent.system_one: state + typed questions -> calibrated typed answers.
+  Mirrors laya 0.3.0 agent.py (temperature calibration, entropy confidence,
+  the `action` extension)."
   (:require [clojure.edn :as edn]
             [laya.model :as m]
             [laya.sequence :as seq]
@@ -68,13 +69,13 @@
         s (reduce + ex)]
     (mapv #(/ % s) ex)))
 
-(defn- confidence
-  "1 - normalized entropy (confidence_from_probs)."
+(defn confidence-from-probs
+  "1 - normalized entropy, clipped to [0, 1] (confidence_from_probs)."
   [p k]
   (if (< k 2)
     1.0
-    (let [ent (- (reduce + (map (fn [pi] (* pi (Math/log (max pi 1e-12)))) p)))]
-      (- 1 (/ ent (Math/log k))))))
+    (let [ent (- (reduce + (map (fn [pi] (* pi (Math/log (max pi 1e-12)))) (take k p))))]
+      (-> (- 1.0 (/ ent (Math/log k))) (max 0.0) (min 1.0)))))
 
 (defn- argmax [xs]
   (reduce (fn [bi i] (if (> (nth xs i) (nth xs bi)) i bi)) 0 (range (count xs))))
@@ -82,25 +83,27 @@
 (defn- key-str [k] (if (keyword? k) (name k) (str k)))
 
 (defn- answer-for [q p k actp]
-  (let [ext (array-map "act_probability" actp)]
+  (let [ext (array-map "act_probability" (round4 actp))]
     (case (:t q)
       "choice"
       (let [ks (mapv key-str (keys (:crit q)))]
         (array-map "type" "choice"
                    "choice" (nth ks (argmax p))
                    "probabilities" (seq/ordered-map (map-indexed (fn [i c] [c (round4 (nth p i))]) ks))
-                   "confidence" (round4 (confidence p k))
-                   "rl_agent" ext))
+                   "confidence" (round4 (confidence-from-probs p k))
+                   "action" ext))
       "score"
       (array-map "type" "score"
                  "score" (round4 (reduce + (map-indexed (fn [i pi] (* i pi)) p)))
                  "legend" (seq/ordered-map (map-indexed (fn [i c] [(str i) c]) (:crit q)))
                  "probabilities" (seq/ordered-map (map-indexed (fn [i pi] [(str i) (round4 pi)]) p))
-                 "confidence" (round4 (confidence p k))
-                 "rl_agent" ext)
-      (array-map "type" "noul"
-                 "noul" (round4 (nth p 1))
-                 "rl_agent" ext))))
+                 "confidence" (round4 (confidence-from-probs p k))
+                 "action" ext)
+      (let [p1 (double (nth p 1))]
+        (array-map "type" "noul"
+                   "noul" (round4 p1)
+                   "confidence" (round4 (max p1 (- 1.0 p1)))
+                   "action" ext)))))
 
 (defn system-one
   "state + {qid -> qdef} -> Jev answer map (ordered to match json.dumps)."
@@ -125,12 +128,14 @@
                    (let [k (count markers)
                          [logits act] (m/forward-row w cfg ids (vec (repeat (count ids) 1))
                                                      markers (vec (repeat k 1)) qtype)
-                         temp (get (:temperature-by-options cfg)
-                                   (seq/temp-bucket qtype k)
-                                   (nth (:temperature cfg) qtype))
+                         ;; max(1e-3, t_scale): a degenerate fitted temperature
+                         ;; saturates the softmax instead of dividing by zero
+                         temp (max 1e-3 (double (get (:temperature-by-options cfg)
+                                                     (seq/temp-bucket qtype k)
+                                                     (nth (:temperature cfg) qtype))))
                          p (softmax (mapv #(/ (double %) temp) (take k logits)))
                          actp (first (softmax act))]
                      [qid (answer-for q p k actp)])))]
-    (array-map "model" "rl-agent"
+    (array-map "model" "laya-rl-agent"
                "answers" answers
                "usage" (array-map "input_tokens" n-tokens "output_tokens" 0))))

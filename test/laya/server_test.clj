@@ -24,7 +24,7 @@
 (defn- readme-request []
   (let [cases (tu/read-golden "cases")]
     (seq/json-str (seq/ordered-map [["state" (:readme-state cases)]
-                                    ["model" "rl-agent"]
+                                    ["model" "laya-rl-agent"]
                                     ["questions" (:readme-questions cases)]]))))
 
 (deftest systemone-reproduces-the-python-answer
@@ -48,7 +48,7 @@
     (testing "defaults to the checkpoint's name"
       (let [[st body] (call h (req :post "/v1/systemone" :body (seq/json-str one-q)))]
         (is (= 200 st))
-        (is (= "rl-agent" (get body "model")))))
+        (is (= "laya-rl-agent" (get body "model")))))
     (testing "must be a string"
       (let [[st body] (call h (req :post "/v1/systemone" :body (seq/json-str (assoc one-q "model" 3))))]
         (is (= 422 st))
@@ -117,7 +117,7 @@
     (is (= 405 (first (call h (req :post "/health")))))
     (let [[st b] (call h (req :get "/health"))]
       (is (= 200 st))
-      (is (= {"status" "ok" "model" "rl-agent"} b)))))
+      (is (= {"status" "ok" "model" "laya-rl-agent"} b)))))
 
 (deftest wire-order-is-preserved
   (testing "14 options and 9 questions keep their JSON order end to end"
@@ -144,7 +144,7 @@
             answer (curl (str "-X POST -H 'Content-Type: application/json' -H 'Authorization: Bearer k' -d '"
                              body "' " base "/v1/systemone"))
             denied (curl (str "-o /dev/null -w '%{http_code}' -X POST -d '{}' " base "/v1/systemone"))]
-        (is (= {"status" "ok" "model" "rl-agent"} (json/read-str (str/trim health))))
+        (is (= {"status" "ok" "model" "laya-rl-agent"} (json/read-str (str/trim health))))
         (is (= (:system-one (tu/read-golden "readme")) (str/trim answer)))
         (is (= "401" (str/trim denied))))
       (finally

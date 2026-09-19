@@ -4,7 +4,7 @@
 
     POST /v1/systemone   {\"state\": ..., \"model\": ..., \"questions\": {...}}
                          -> {\"model\": ..., \"answers\": {...}, \"usage\": {...}}
-    GET  /health         -> {\"status\": \"ok\", \"model\": \"rl-agent\"}
+    GET  /health         -> {\"status\": \"ok\", \"model\": \"laya-rl-agent\"}
 
   Auth is `Authorization: Bearer <key>` when the server is started with an
   :api-key (LAYA_API_KEY); without one every request is accepted. Errors:
@@ -31,7 +31,7 @@
             [ring-chez.adapter :as adapter])
   (:gen-class))
 
-(def default-model "rl-agent")
+(def default-model "laya-rl-agent")
 
 ;; --- responses ------------------------------------------------------------------
 

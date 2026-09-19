@@ -111,23 +111,31 @@
 (defn serialize-state [state]
   (if (string? state) state (json-str state)))
 
-(defn- falsy?
-  "Python `not v`: None, False, 0/0.0, empty string and empty collections."
+(defn- no-description?
+  "laya 0.3.0: only None and \"\" mean \"no description\"; 0 and False are
+  legitimate criterion values (the old `not v` test dropped them)."
   [v]
-  (or (nil? v) (false? v) (= v "")
-      (and (number? v) (zero? v))
-      (and (coll? v) (empty? v))))
+  (or (nil? v) (= v "")))
+
+(defn render-criterion
+  "render_criterion: strings pass through, anything structured becomes
+  compact JSON (json.dumps with separators (\", \", \": \"), ensure_ascii
+  off), so a rubric reads as JSON rather than a Python repr."
+  [v]
+  (if (string? v) v (json-str v)))
 
 (defn render-options
   "Option texts in label-index order. noul is always [false, true] so p[1] == noul."
   [q]
   (let [t (:t q) crit (:crit q)]
     (case t
-      "choice" (mapv (fn [[k v]] (if (falsy? v) (str k) (str k ": " v))) crit)
-      "score" (mapv (fn [i c] (str "level " i ": " c)) (range) crit)
-      (let [c (or crit {})]
-        [(str "false: " (or (get c "false") "no, the statement does not hold"))
-         (str "true: " (or (get c "true") "yes, the statement holds"))]))))
+      "choice" (mapv (fn [[k v]] (if (no-description? v) (str k) (str k ": " (render-criterion v)))) crit)
+      "score" (mapv (fn [i c] (str "level " i ": " (render-criterion c))) (range) crit)
+      (let [c (or crit {})
+            f (get c "false")
+            tr (get c "true")]
+        [(str "false: " (if (no-description? f) "no, the statement does not hold" (render-criterion f)))
+         (str "true: " (if (no-description? tr) "yes, the statement holds" (render-criterion tr)))]))))
 
 (defn temp-bucket
   "Per-cardinality temperature key, e.g. \"choice:3-5\"."

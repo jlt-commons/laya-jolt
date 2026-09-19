@@ -87,7 +87,7 @@
     (let [g (tu/read-golden "email_answers")
           bodies (mapv first (:clean (tu/read-golden "email")))
           qs (:questions g)]
-      (is (= 7 (count qs)))
+      (is (= 6 (count qs)))
       (doseq [{:keys [body-index state result]} (:cases g)]
         (let [st (email/email-state "Support request" (nth bodies body-index) :sender "someone@example.com")
               want (json/read-str result)
@@ -126,3 +126,34 @@
         (is (= 0.4312 (get-in a ["churn_risk" "noul"])))
         (is (= 0.0312 (get-in a ["is_phishing" "noul"])))
         (is (= 367 (get-in out ["usage" "input_tokens"])))))))
+
+(deftest answer-shape-is-laya-0-3
+  ;; laya 0.3.0 (Agent.system_one): "action" not "rl_agent", act_probability
+  ;; rounded, noul carries a confidence, model is "laya-rl-agent"
+  (let [out (ag/system-one @agent state questions)
+        a (get out "answers")]
+    (is (= "laya-rl-agent" (get out "model")))
+    (is (= ["type" "choice" "probabilities" "confidence" "action"] (keys (get a "department"))))
+    (is (= ["type" "score" "legend" "probabilities" "confidence" "action"] (keys (get a "urgency"))))
+    (is (= ["type" "noul" "confidence" "action"] (keys (get a "churn_risk"))))
+    (testing "noul confidence = round(max(p, 1-p), 4)"
+      (let [p (get-in a ["churn_risk" "noul"])]
+        (is (= (/ (Math/round (* 1e4 (max p (- 1 p)))) 1e4) (get-in a ["churn_risk" "confidence"])))))
+    (testing "act_probability is rounded to 4 decimals"
+      (doseq [[_ ans] a]
+        (let [ap (get-in ans ["action" "act_probability"])]
+          (is (= ap (/ (Math/round (* 1e4 ap)) 1e4))))))))
+
+(deftest calibration-guards
+  (testing "confidence is clipped to [0, 1]"
+    (is (= 1.0 (ag/confidence-from-probs [1.0 0.0] 2)))
+    (is (= 0.0 (ag/confidence-from-probs [0.5 0.5] 2)))
+    (is (= 1.0 (ag/confidence-from-probs [1.0] 1)))
+    (is (<= 0.0 (ag/confidence-from-probs [0.25 0.25 0.25 0.25] 4) 1e-12)))
+  (testing "a zero temperature is floored at 1e-3 instead of dividing by zero"
+    (let [cold (update @agent :cfg assoc :temperature [0.0 0.0 0.0] :temperature-by-options {})
+          out (ag/system-one cold state (select-keys questions ["churn_risk"]))
+          p (get-in out ["answers" "churn_risk" "noul"])]
+      (is (number? p))
+      (is (not (Double/isNaN p)))
+      (is (contains? #{0.0 1.0} p) "a floored temperature saturates the softmax"))))

@@ -1,5 +1,5 @@
 (ns laya.email-test
-  "email_utils.py parity. golden/email.edn holds clean_email_body in/out
+  "laya email.py parity. golden/email.edn holds clean_email_body in/out
   pairs and json.dumps of email_state / email_questions from the Python
   module, so the port is compared byte for byte."
   (:require [clojure.edn :as edn]

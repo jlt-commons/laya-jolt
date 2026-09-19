@@ -82,15 +82,15 @@ or a literal with at most 8 entries); a hash-map would reorder them.
 
 ```
 POST /v1/systemone        Authorization: Bearer <key>   (only if a key is configured)
-{"state": <string|object|array>, "model": "rl-agent", "questions": {"<id>": {...}}}
+{"state": <string|object|array>, "model": "laya-rl-agent", "questions": {"<id>": {...}}}
 -> {"model": ..., "answers": {"<id>": {...}}, "usage": {"input_tokens": n, "output_tokens": 0}}
 
-GET  /health              -> {"status": "ok", "model": "rl-agent"}
+GET  /health              -> {"status": "ok", "model": "laya-rl-agent"}
 ```
 
 Questions and answers have the shapes the Python `RLAgent.system_one`
 uses (choice / score / noul, plus the `rl_agent.act_probability` extension).
-`model` is optional and echoed back; it defaults to `rl-agent`. Errors:
+`model` is optional and echoed back; it defaults to `laya-rl-agent`. Errors:
 `401` for a missing or wrong key, `422` with
 `{"detail": [{"loc": ["body", "questions", "<id>", "criteria"], "msg": ..., "type": ...}]}`
 for anything wrong with the body (malformed JSON, missing state or
