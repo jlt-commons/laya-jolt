@@ -2,7 +2,7 @@
 
  ;; data.json reads tokenizer.json / the configs / the safetensors header in
  ;; `jolt prepare`. It needs java.time at load, which jolt-lang/time provides.
- ;; ring-chez-adapter serves laya.server (jolt -M:serve / the built binary);
+ ;; ring-chez-adapter serves lev.server (jolt -M:serve / the built binary);
  ;; ruuter (a 150-line data-driven router) dispatches its routes.
  :deps {org.clojure/data.json {:mvn/version "2.5.1"}
         org.clojars.askonomm/ruuter {:mvn/version "1.3.5"}
@@ -12,16 +12,16 @@
                                      :git/tag "v0.7.4"
                                      :git/sha "ce4a7459dcaa33c760c0a7323026ae4c0d260bd4"}}
 
- ;; kernels: built from native/laya_kernels.c by the `kernels` task.
+ ;; kernels: built from native/lev_kernels.c by the `kernels` task.
  ;; icu: NFC for the tokenizer. mac ships libicucore in the shared cache;
  ;; linux distros name it libicuuc.so.<ver>.
  ;; blas: Accelerate framework on mac, OpenBLAS elsewhere.
  ;; `jolt build` links the kernels statically from the archive so the binary
  ;; is self-contained; run/repl/test load the shared object.
- :jolt/native [{:name "laya_kernels"
-                :darwin ["native/liblaya_kernels.dylib"]
-                :linux  ["native/liblaya_kernels.so"]
-                :static {:archive "native/liblaya_kernels.a"}}
+ :jolt/native [{:name "lev_kernels"
+                :darwin ["native/liblev_kernels.dylib"]
+                :linux  ["native/liblev_kernels.so"]
+                :static {:archive "native/liblev_kernels.a"}}
                {:name "icu"
                 :darwin ["libicucore.dylib"]
                 :linux  ["libicuuc.so.76" "libicuuc.so.75" "libicuuc.so.74"
@@ -34,45 +34,45 @@
  {:requires ([babashka.fs :as fs])
 
   :init (do (def mac? (some? (re-find #"^Mac" (System/getProperty "os.name"))))
-            (def kern-lib (str "native/liblaya_kernels." (if mac? "dylib" "so")))
-            (def kern-archive "native/liblaya_kernels.a"))
+            (def kern-lib (str "native/liblev_kernels." (if mac? "dylib" "so")))
+            (def kern-archive "native/liblev_kernels.a"))
 
   kernels
-  {:doc "compile native/laya_kernels.c into the kernel library (shared + static archive)"
+  {:doc "compile native/lev_kernels.c into the kernel library (shared + static archive)"
    :task (if (and (fs/exists? kern-lib) (fs/exists? kern-archive)
-                  (empty? (fs/modified-since kern-lib ["native/laya_kernels.c"]))
-                  (empty? (fs/modified-since kern-archive ["native/laya_kernels.c"])))
+                  (empty? (fs/modified-since kern-lib ["native/lev_kernels.c"]))
+                  (empty? (fs/modified-since kern-archive ["native/lev_kernels.c"])))
            (println "kernels: up to date -" kern-lib kern-archive)
            (do (shell "cc" "-O2" "-std=c11" "-pthread" "-shared" "-fPIC"
-                      "native/laya_kernels.c" "-o" kern-lib)
+                      "native/lev_kernels.c" "-o" kern-lib)
                (shell "cc" "-O2" "-std=c11" "-pthread" "-c" "-fPIC"
-                      "native/laya_kernels.c" "-o" "native/laya_kernels.o")
-               (shell "ar" "rcs" kern-archive "native/laya_kernels.o")
-               (fs/delete-if-exists "native/laya_kernels.o")
+                      "native/lev_kernels.c" "-o" "native/lev_kernels.o")
+               (shell "ar" "rcs" kern-archive "native/lev_kernels.o")
+               (fs/delete-if-exists "native/lev_kernels.o")
                (println "built:" kern-lib kern-archive)))}
 
   binary
-  {:doc "build the standalone HTTP server ./laya-server and self-test it against golden/"
+  {:doc "build the standalone HTTP server ./lev-server and self-test it against golden/"
    :depends [kernels]
-   :task (do (shell "jolt" "build" "-m" "laya.server" "-o" "laya-server")
+   :task (do (shell "jolt" "build" "-m" "lev.server" "-o" "lev-server")
              ;; the suite runs interpreted; the AOT build must prove itself
-             (shell "./laya-server" "--self-test" "--data" "data" "--golden" "golden")
-             (println "built: ./laya-server  (run: ./laya-server --data data --port 8080)"))}
+             (shell "./lev-server" "--self-test" "--data" "data" "--golden" "golden")
+             (println "built: ./lev-server  (run: ./lev-server --data data --port 8080)"))}
 
   prepare
-  {:doc "convert the Laya checkpoint into data/ (LAYA_HOME / LAYA_DATA, ~/.config/laya/config.edn :laya-home / :data, else ../laya and data)"
+  {:doc "convert the Laya checkpoint into data/ (LAYA_HOME / LEV_DATA, ~/.config/lev/config.edn :laya-home / :data, else ../laya and data)"
    :depends [kernels]
    :task (shell "jolt" "-M:prepare")}
 
   clean-native
   {:doc "remove the compiled kernel library"
-   :task (do (fs/delete-if-exists "native/liblaya_kernels.dylib")
-             (fs/delete-if-exists "native/liblaya_kernels.so")
-             (fs/delete-if-exists "native/liblaya_kernels.a")
+   :task (do (fs/delete-if-exists "native/liblev_kernels.dylib")
+             (fs/delete-if-exists "native/liblev_kernels.so")
+             (fs/delete-if-exists "native/liblev_kernels.a")
              (println "removed kernel libs"))}}
 
  :aliases {:test {:extra-paths ["test"]
-                  :main-opts ["-m" "laya.test-runner"]}
-           :run {:main-opts ["-m" "laya.run"]}
-           :prepare {:main-opts ["-m" "laya.prepare"]}
-           :serve {:main-opts ["-m" "laya.server"]}}}
+                  :main-opts ["-m" "lev.test-runner"]}
+           :run {:main-opts ["-m" "lev.run"]}
+           :prepare {:main-opts ["-m" "lev.prepare"]}
+           :serve {:main-opts ["-m" "lev.server"]}}}

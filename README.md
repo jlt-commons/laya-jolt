@@ -1,12 +1,17 @@
-# laya-jolt
+# lev
 
-Pure-Clojure inference for the Laya decision models, running on
-[jolt](https://github.com/jolt-lang/jolt) (Chez Scheme, no JVM). Same weights,
-same outputs: the stack reproduces the Python package's `Agent.system_one`
-answer for the README quickstart to the fourth decimal it prints, on all
-three checkpoints of the [convaiinnovations/laya](https://huggingface.co/convaiinnovations/laya)
+System One decisions — typed questions over a state, answered in one
+forward pass with calibrated probabilities — as one Clojure binary on
+[jolt](https://github.com/jolt-lang/jolt) (Chez Scheme, no JVM). lev runs
+the Laya decision models: same weights, same outputs, the stack reproduces
+the Python package's `Agent.system_one` answer for the README quickstart to
+the fourth decimal it prints, on all three checkpoints of the
+[convaiinnovations/laya](https://huggingface.co/convaiinnovations/laya)
 bundle, and picks the checkpoint per request the way the package's `Router`
-does.
+does. (The project was `laya-jolt` until 2026-09-19; the namespaces are
+`lev.*`, the binary `lev-server`, the config `~/.config/lev`, the
+environment `LEV_*`; the checkpoints and the answers' `"model":
+"laya-rl-agent"` keep the model's name.)
 
 The models are ModernBERT encoders (RoPE, alternating full/sliding
 attention, a GELU-gated MLP; ModernBERT-large for `english` and `typed-decisions`,
@@ -68,12 +73,12 @@ files and says so.
 ## Build and run
 
 ```
-jolt kernels             # compile native/laya_kernels.c
+jolt kernels             # compile native/lev_kernels.c
 jolt prepare             # every checkpoint under ../laya -> data/, data/typed-decisions, ...
 jolt -M:test             # parity suites vs golden/
 jolt -M:run demo         # README quickstart through the workflow runner
 jolt -M:serve            # HTTP API on http://127.0.0.1:8080
-jolt binary              # standalone ./laya-server, self-tested against golden/
+jolt binary              # standalone ./lev-server, self-tested against golden/
 ```
 
 `jolt kernels` shells out to `cc`. `jolt prepare` needs only the checkpoints
@@ -83,8 +88,8 @@ oracle (english at the root, `golden/typed-decisions/` and
 `golden/multilingual/` for the others) and is checked in.
 
 `jolt -M:test` runs everything against whatever is prepared under `data/`;
-`jolt -M:test laya.checkpoints-test` runs one namespace, and
-`LAYA_CHECKPOINTS=typed-decisions` (comma-separated, empty for none)
+`jolt -M:test lev.checkpoints-test` runs one namespace, and
+`LEV_CHECKPOINTS=typed-decisions` (comma-separated, empty for none)
 restricts the extra-checkpoint parity suite, which is how CI tests one
 checkpoint per process. `jolt -M:run demo` prints the quickstart answer
 JSON: the `:system-one` value in `golden/readme.edn` (to the fourth
@@ -96,7 +101,7 @@ input, pass `:criteria` and the questions map as ordered maps (`array-map`,
 or a literal with at most 8 entries); a hash-map would reorder them.
 
 ```clojure
-(require '[laya.agent :as ag] '[laya.workflows :as wf])
+(require '[lev.agent :as ag] '[lev.workflows :as wf])
 (def agent (ag/load-agent "data"))
 (def email (wf/load-workflow "workflows/email.clj"))          ; or (wf/load-workflows dirs)
 (ag/system-one agent
@@ -104,12 +109,12 @@ or a literal with at most 8 entries); a hash-map would reorder them.
                (wf/questions email))
 ```
 
-## Configuration: `~/.config/laya`
+## Configuration: `~/.config/lev`
 
 Every entry point (`jolt prepare`, `jolt -M:run`, `jolt -M:serve`, the
 binary) resolves its settings the same way: **CLI flag > environment
 variable > `config.edn` > default**. `config.edn` lives in
-`$LAYA_CONFIG_DIR`, else `$XDG_CONFIG_HOME/laya`, else `~/.config/laya`:
+`$LEV_CONFIG_DIR`, else `$XDG_CONFIG_HOME/laya`, else `~/.config/lev`:
 
 ```clojure
 {:data "/Users/me/models/laya-data"      ; prepared data root: what jolt prepare writes and everything else loads
@@ -124,19 +129,19 @@ variable > `config.edn` > default**. `config.edn` lives in
 
 | setting | flag | environment | `config.edn` | default |
 |---|---|---|---|---|
-| prepared data root | `--data DIR` | `LAYA_DATA` | `:data` | `data` |
+| prepared data root | `--data DIR` | `LEV_DATA` | `:data` | `data` |
 | checkpoints (prepare) | `--laya DIR` | `LAYA_HOME` | `:laya-home` | `../laya` |
-| workflow dirs | `--workflows DIR[:DIR]` | `LAYA_WORKFLOWS` | `:workflow-dirs` (adds) | see below |
-| server | `--port` `--host` `--api-key` | `PORT` `LAYA_HOST` `LAYA_API_KEY` | `:port` `:host` `:api-key` | `8080` `127.0.0.1` none |
+| workflow dirs | `--workflows DIR[:DIR]` | `LEV_WORKFLOWS` | `:workflow-dirs` (adds) | see below |
+| server | `--port` `--host` `--api-key` | `PORT` `LEV_HOST` `LEV_API_KEY` | `:port` `:host` `:api-key` | `8080` `127.0.0.1` none |
 | resident checkpoints | `--max-loaded N` | `LAYA_MAX_LOADED` | `:max-loaded` | `1` |
 | startup / fallback checkpoint | `--default-model NAME` | `LAYA_DEFAULT_MODEL` | `:default-model` | `english` |
 | typed-decisions by question ids | `--auto-task-detection` | — | `:auto-task-detection` | off |
-| sequence limits | `--max-len N` `--head-max-len N` | `LAYA_MAX_LEN` `LAYA_HEAD_MAX_LEN` | `:max-len` `:head-max-len`, `:checkpoints {"name" {…}}` | the checkpoint's own (`rl_agent_config.json`) |
-| goldens (`--self-test`) | `--golden DIR` | `LAYA_GOLDEN` | `:golden` | `golden` |
+| sequence limits | `--max-len N` `--head-max-len N` | `LEV_MAX_LEN` `LEV_HEAD_MAX_LEN` | `:max-len` `:head-max-len`, `:checkpoints {"name" {…}}` | the checkpoint's own (`rl_agent_config.json`) |
+| goldens (`--self-test`) | `--golden DIR` | `LEV_GOLDEN` | `:golden` | `golden` |
 
-`--workflows` and `LAYA_WORKFLOWS` are the exception to "adds": they name
+`--workflows` and `LEV_WORKFLOWS` are the exception to "adds": they name
 exactly the directories to scan, replacing the defaults, so a test or a
-one-off run is isolated from whatever is in `~/.config/laya`.
+one-off run is isolated from whatever is in `~/.config/lev`.
 
 ## Context: what the model sees
 
@@ -167,7 +172,7 @@ total over all questions, so it tells you when a state is being cut.
 
 Both limits are yours to change: `:max-len` / `:head-max-len` in
 `config.edn` (for every checkpoint, or per name under `:checkpoints`),
-`--max-len` / `--head-max-len`, or `LAYA_MAX_LEN` / `LAYA_HEAD_MAX_LEN`
+`--max-len` / `--head-max-len`, or `LEV_MAX_LEN` / `LEV_HEAD_MAX_LEN`
 (Configuration). They apply when a checkpoint loads; `GET /v1/models`
 reports the effective values and the server log says `max_len 768 (trained
 512)`. RoPE has no position table, so a longer sequence runs fine
@@ -223,9 +228,9 @@ workflow contract is where it would go.
 A workflow packages a use case: how to turn raw input into the model's
 state, and which typed questions to ask. They are ordinary Clojure files,
 not part of `src/`: the bundled ones live in [`workflows/`](workflows) and
-yours go in `~/.config/laya/workflows/` (or any directory listed in
+yours go in `~/.config/lev/workflows/` (or any directory listed in
 `config.edn :workflow-dirs`). Directories load in that order and a later
-one wins on a name clash, so a `~/.config/laya/workflows/email.clj`
+one wins on a name clash, so a `~/.config/lev/workflows/email.clj`
 replaces the bundled `email`.
 
 A file `<dir>/<name>.clj` defines the namespace `workflows.<name>`
@@ -259,14 +264,14 @@ jolt -M:run --list                                          # what is loaded, fr
 jolt -M:run refund-risk '{"text": "Charged twice, want my money back"}'
 jolt -M:run refund-risk @ticket.json --options '{"teams": {"billing": "money", "fraud": "chargebacks"}}'
 jolt -M:run refund-risk @ticket.json --constraints '[["implies", ["wants_refund", true], ["team", "billing"]]]'
-LAYA_WORKFLOWS=./my-workflows jolt -M:run refund-risk @ticket.json   # only that directory
+LEV_WORKFLOWS=./my-workflows jolt -M:run refund-risk @ticket.json   # only that directory
 ```
 
 ### Constraints
 
 The model answers each question on its own. A workflow (or a request) can
 tie them with constraints, decided jointly after the forward pass
-(`laya.constraints`, the port of GLiNER2's constrained classification):
+(`lev.constraints`, the port of GLiNER2's constrained classification):
 
 ```clojure
 (defn constraints                                    ; optional; same arities as questions
@@ -307,11 +312,11 @@ equivalent of:
 | `triage` | `{"message"}` or a string | intent, urgency, frustration, refund requested, churn risk |
 | `guard` | `{"prompt"}` or a string | jailbreak, prompt injection, sensitive data, harm severity, topic |
 | `moderation` | `{"post"}` or a string | toxic, harassment, threat, spam, severity |
-| `llm-router` | `{"request"}` or a string | difficulty, domain, needs tools, is sensitive (routing *your* LLM traffic; `laya.router` picks Laya checkpoints) |
+| `llm-router` | `{"request"}` or a string | difficulty, domain, needs tools, is sensitive (routing *your* LLM traffic; `lev.router` picks Laya checkpoints) |
 
 ## HTTP API
 
-`laya.server` mirrors the [TypeSafe Jev API](https://docs.typesafe.ai/api)
+`lev.server` mirrors the [TypeSafe Jev API](https://docs.typesafe.ai/api)
 and adds the Python package's `Router` and presets. Routes are dispatched by
 [ruuter](https://github.com/askonomm/ruuter).
 
@@ -355,7 +360,7 @@ unknown routes and workflows, `405` for the wrong method,
 serialized on one lock; the adapter's workers overlap only on I/O.
 
 ```
-jolt -M:serve --port 8080 --host 0.0.0.0 --api-key s3cret   # or PORT / LAYA_HOST / LAYA_API_KEY / LAYA_DATA, or config.edn
+jolt -M:serve --port 8080 --host 0.0.0.0 --api-key s3cret   # or PORT / LEV_HOST / LEV_API_KEY / LEV_DATA, or config.edn
 curl -s -H 'Authorization: Bearer s3cret' -H 'Content-Type: application/json' \
   -d '{"state": "Help! My payouts have been failing for 3 days.",
        "questions": {"is_urgent": {"type": "noul", "instructions": "Does this convey urgency?"}}}' \
@@ -377,8 +382,8 @@ Add this repo as a `:git/url` dep, run `jolt kernels` / `jolt prepare` for
 the native library and `data/`, then:
 
 ```clojure
-(require '[laya.agent :as ag] '[laya.server :as server] '[laya.config :as cfg])
-(def agent (ag/load-agent (cfg/setting (cfg/context {}) "--data" "LAYA_DATA" :data "data")))
+(require '[lev.agent :as ag] '[lev.server :as server] '[lev.config :as cfg])
+(def agent (ag/load-agent (cfg/setting (cfg/context {}) "--data" "LEV_DATA" :data "data")))
 (ag/system-one agent state questions)                  ; the Python API, as data (~1.7 GB f32, loaded once)
 (def h (server/handler agent {:api-key nil}))          ; a ring handler to mount anywhere
 (def s (server/start agent {:port 8080}))              ; or run it on ring-chez-adapter
@@ -389,7 +394,7 @@ Or route between the checkpoints like the Python `Router`, loading each on
 first use and keeping `:max-loaded` resident:
 
 ```clojure
-(require '[laya.router :as router])
+(require '[lev.router :as router])
 (def rt (router/make-router {:data "data" :max-loaded 2}))          ; data/, data/multilingual, data/typed-decisions
 (router/route rt {"body" "Der Kunde wurde zweimal belastet"} questions)   ; the decision, nothing loaded
 ;; => {"model" "multilingual", "repo" "convaiinnovations/laya/multilingual",
@@ -397,27 +402,27 @@ first use and keeping `:max-loaded` resident:
 (router/predict rt state questions)                                  ; system-one + "routing"
 (router/predict rt state questions :model "typed-decisions")         ; or :lang "de", :task "typed_decisions"
 (router/loaded rt)                                                   ; ["multilingual" "typed-decisions"]
-(def h (server/handler rt {:workflows (laya.workflows/load-workflows ["workflows"])}))
+(def h (server/handler rt {:workflows (lev.workflows/load-workflows ["workflows"])}))
 ```
 
 ### As a binary
 
-`jolt binary` runs `jolt build -m laya.server -o laya-server` with the C
-kernels linked in statically, then runs `./laya-server --self-test` against
+`jolt binary` runs `jolt build -m lev.server -o lev-server` with the C
+kernels linked in statically, then runs `./lev-server --self-test` against
 `golden/`. The suite runs interpreted, and a compiler release can build
 the tree wrong where the interpreter runs it right (jolt 0.8.9 miscompiled a
 `reduce` whose accumulator starts as `nil` and is tested with `nil?`, the
-pattern `laya.tokenizer/lowest-ranked-pair` uses; 0.8.10 fixed it), so the
+pattern `lev.tokenizer/lowest-ranked-pair` uses; 0.8.10 fixed it), so the
 binary proves itself before it ships. It still needs the prepared data root next
 to it (or `--data DIR` / `config.edn`), the workflows (`./workflows` relative
-to where it runs, `--workflows`, `LAYA_WORKFLOWS` or `config.edn`, plus
-`~/.config/laya/workflows`; the workflow files are loaded from source at
+to where it runs, `--workflows`, `LEV_WORKFLOWS` or `config.edn`, plus
+`~/.config/lev/workflows`; the workflow files are loaded from source at
 startup, so they need no rebuild), ICU and BLAS from the OS, and
 libssl/libcrypto for the adapter.
 
 ```
-./laya-server --data data --workflows workflows --port 8080 --api-key s3cret
-./laya-server --self-test --data data --golden golden
+./lev-server --data data --workflows workflows --port 8080 --api-key s3cret
+./lev-server --self-test --data data --golden golden
 ```
 
 Tagged releases (`v*`) carry this binary prebuilt for macOS arm64 and Linux
@@ -441,9 +446,9 @@ not the encoder; see [bench/README.md](bench/README.md).
 Both platforms are supported; `deps.edn` carries darwin and linux entries and
 the build task branches on OS.
 
-- **kernels** — `native/liblaya_kernels.dylib` (mac) / `.so` (linux), built by
+- **kernels** — `native/liblev_kernels.dylib` (mac) / `.so` (linux), built by
   `jolt kernels`: the elementwise and reduction kernels and attention, with
-  a pthread pool of their own (`LAYA_THREADS`). Attention calls
+  a pthread pool of their own (`LEV_THREADS`). Attention calls
   `cblas_sgemm` through a pointer the Clojure side hands it, so the library
   links against no BLAS.
 - **ICU** — `libicucore.dylib` on mac (unguarded symbols in the system dylib),
@@ -455,7 +460,7 @@ the build task branches on OS.
   first spelling that exists, for versions 60..90.
 - **JSON** — `org.clojure/data.json` from Maven, plus `jolt-lang/time` which
   provides the `java.time` classes data.json needs to load. Only `prepare`
-  uses them; requests are read by `laya.json`, which keeps key order.
+  uses them; requests are read by `lev.json`, which keeps key order.
 - **HTTP** — `jolt-lang/ring-chez-adapter` serves the API and
   `org.clojars.askonomm/ruuter` (Clojars) dispatches its routes.
 - **BLAS** — `cblas_sgemm` from the Accelerate framework on mac, OpenBLAS on
@@ -489,8 +494,8 @@ the bundled `demo` (4 questions, ~90 tokens each) takes ~290 ms and
 `email` on a 3,000-character body (5 questions at the 512 cap) ~1.5 s. The
 matmuls are Accelerate's (multi-core); attention (heads x query blocks),
 the swiglu GELU and LayerNorm (rows) run on the kernel library's own
-thread pool, `LAYA_THREADS` wide (default: the online processors;
-`laya.tensors/set-threads!` at runtime). The thread count changes only the
+thread pool, `LEV_THREADS` wide (default: the online processors;
+`lev.tensors/set-threads!` at runtime). The thread count changes only the
 schedule, never a result: every task runs the same arithmetic, and the
 suite checks the bytes are identical at 1, 2, 3 and 8 threads. On one
 thread the same call takes ~520 ms at 512 tokens and `email` ~2.3 s.

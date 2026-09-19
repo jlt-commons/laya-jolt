@@ -11,10 +11,10 @@
   Prints per-family accuracy, balanced accuracy and ms per case; --out
   writes one line per case with the prediction and the probabilities."
   (:require [clojure.string :as str]
-            [laya.agent :as ag]
-            [laya.config :as cfg]
-            [laya.json :as json]
-            [laya.sequence :as seq]))
+            [lev.agent :as ag]
+            [lev.config :as cfg]
+            [lev.json :as json]
+            [lev.sequence :as seq]))
 
 (defn- rows [file]
   (mapv json/read-str (remove str/blank? (str/split-lines (slurp file)))))
@@ -50,7 +50,7 @@
   (let [opts (cfg/parse-args args)
         ctx (cfg/context opts)
         model (get opts "--model" "english")
-        data (cfg/setting ctx "--data" "LAYA_DATA" :data "data")
+        data (cfg/setting ctx "--data" "LEV_DATA" :data "data")
         dir (if (= model "english") data (str data "/" model))
         file (get opts "--file" "bench/data/authored144.jsonl")
         agent (ag/load-agent dir (cfg/limits ctx model))

@@ -4,15 +4,15 @@
   module, so the port is compared byte for byte."
   (:require [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]
-            [laya.workflows :as wf]
-            [laya.sequence :as seq]))
+            [lev.workflows :as wf]
+            [lev.sequence :as seq]))
 
 ;; the bundled email workflow is a file, not a classpath namespace
 (wf/load-workflow "workflows/email.clj")
 (alias 'email 'workflows.email)
 
 (def golden-dir
-  (or (System/getenv "LAYA_GOLDEN") "golden"))
+  (or (System/getenv "LEV_GOLDEN") "golden"))
 
 (def golden (delay (edn/read-string (slurp (str golden-dir "/email.edn")))))
 

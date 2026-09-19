@@ -11,7 +11,7 @@ target/
 .clj-kondo/
 .lsp/
 *.a
-laya-server
+lev-server
 *.build/
 
 # Beads / Dolt files (added by bd init)

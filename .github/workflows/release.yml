@@ -1,6 +1,6 @@
 name: release
 
-# Build the standalone laya-server for macOS (arm64) and Linux (x86_64) and
+# Build the standalone lev-server for macOS (arm64) and Linux (x86_64) and
 # attach both to the GitHub Release when a v* tag is pushed. workflow_dispatch
 # builds the same binaries as workflow artifacts without publishing a release.
 on:
@@ -22,7 +22,7 @@ permissions:
 # The self-test matters more here than in most projects: jolt 0.8.9's release
 # build miscompiled one pattern the tokenizer uses (fixed in 0.8.10; see README,
 # "As a binary"), and the interpreted suite cannot see that kind of thing.
-# `jolt binary` builds and then runs ./laya-server --self-test against golden/,
+# `jolt binary` builds and then runs ./lev-server --self-test against golden/,
 # so a bad binary never ships.
 
 jobs:
@@ -48,13 +48,13 @@ jobs:
       # the english suite, then each extra checkpoint on its own: three loaded
       # checkpoints are ~4.7 GB of f32 and the mac runner has 7 GB
       - name: Test
-        run: LAYA_CHECKPOINTS= jolt -M:test
+        run: LEV_CHECKPOINTS= jolt -M:test
 
       - name: Test typed-decisions
-        run: LAYA_CHECKPOINTS=typed-decisions jolt -M:test laya.checkpoints-test
+        run: LEV_CHECKPOINTS=typed-decisions jolt -M:test lev.checkpoints-test
 
       - name: Test multilingual
-        run: LAYA_CHECKPOINTS=multilingual jolt -M:test laya.checkpoints-test
+        run: LEV_CHECKPOINTS=multilingual jolt -M:test lev.checkpoints-test
 
       - name: Build and self-test the binary
         run: jolt binary
@@ -66,11 +66,11 @@ jobs:
         # data/, and the email/demo workflows for the server.
         run: |
           case "${GITHUB_REF}" in
-            refs/tags/*) name="laya-server-${GITHUB_REF_NAME}-${{ matrix.target }}" ;;
-            *)           name="laya-server-${{ matrix.target }}" ;;
+            refs/tags/*) name="lev-server-${GITHUB_REF_NAME}-${{ matrix.target }}" ;;
+            *)           name="lev-server-${{ matrix.target }}" ;;
           esac
           mkdir -p "$name"
-          cp -r laya-server README.md LICENSE golden workflows "$name/"
+          cp -r lev-server README.md LICENSE golden workflows "$name/"
           tar czf "${name}.tar.gz" "$name"
           echo "PKG=${name}.tar.gz" >> "$GITHUB_ENV"
 
@@ -80,19 +80,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${GITHUB_REF_NAME}" \
-            --title "laya-jolt ${GITHUB_REF_NAME}" \
+            --title "lev ${GITHUB_REF_NAME}" \
             --verify-tag \
-            --notes "Standalone \`laya-server\` for macOS (arm64) and Linux (x86_64), self-tested against \`golden/\`, with the bundled workflows.
+            --notes "Standalone \`lev-server\` for macOS (arm64) and Linux (x86_64), self-tested against \`golden/\`, with the bundled workflows.
 
-          The binary does not carry the weights. Download the \`convaiinnovations/laya\` checkpoints you want (README, Getting the checkpoints) and convert them once with \`jolt prepare\`, then run \`./laya-server --data data --port 8080 --workflows workflows\`. \`./laya-server --self-test --data data --golden golden\` checks the pair. Requests route between the english, multilingual and typed-decisions checkpoints like the Python package's Router; unprepared ones answer 503.
+          The binary does not carry the weights. Download the \`convaiinnovations/laya\` checkpoints you want (README, Getting the checkpoints) and convert them once with \`jolt prepare\`, then run \`./lev-server --data data --port 8080 --workflows workflows\`. \`./lev-server --self-test --data data --golden golden\` checks the pair. Requests route between the english, multilingual and typed-decisions checkpoints like the Python package's Router; unprepared ones answer 503.
 
           Runtime deps on Linux: ICU and OpenBLAS (\`apt install libicu-dev libopenblas-dev\`, or the runtime packages for your release). macOS uses the system ICU and Accelerate.
-          The macOS binary is unsigned; clear the quarantine flag before first run: \`xattr -d com.apple.quarantine ./laya-server\`." \
+          The macOS binary is unsigned; clear the quarantine flag before first run: \`xattr -d com.apple.quarantine ./lev-server\`." \
             || echo "release already exists, uploading asset"
           gh release upload "${GITHUB_REF_NAME}" "${PKG}" --clobber
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: laya-server-${{ matrix.target }}
-          path: laya-server
+          name: lev-server-${{ matrix.target }}
+          path: lev-server

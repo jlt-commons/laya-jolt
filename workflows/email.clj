@@ -3,7 +3,7 @@
   presets.email_questions: clean raw emails into a compact state and answer
   a ready-made set of email questions.
 
-  As a workflow (laya.workflows): `questions` is email-questions, `state`
+  As a workflow (lev.workflows): `questions` is email-questions, `state`
   takes {\"subject\" \"body\" \"from\"} (string keys, as the HTTP API
   receives them) and runs email-state on it, and `constraints` ties
   needs_reply to is_spam / is_phishing. Options: {\"categories\"
@@ -18,8 +18,8 @@
   with Python's semantics: \\s is str.isspace(), \\w is str.isalnum() or _,
   strip() removes str.isspace() chars."
   (:require [clojure.string :as str]
-            [laya.sequence :as seq]
-            [laya.tokenizer :as tk]))
+            [lev.sequence :as seq]
+            [lev.tokenizer :as tk]))
 
 ;; --- python string semantics --------------------------------------------------
 
@@ -259,7 +259,7 @@
 
 (defn constraints
   "Nobody replies to spam or phishing: the decided needs_reply follows
-  is_spam / is_phishing (laya.constraints), whatever each question's own
+  is_spam / is_phishing (lev.constraints), whatever each question's own
   probability says."
   []
   [[:implies ["is_spam" true] ["needs_reply" false]]

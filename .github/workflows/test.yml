@@ -36,10 +36,10 @@ jobs:
       # the english suite, then each extra checkpoint on its own: three loaded
       # checkpoints are ~4.7 GB of f32 and the mac runner has 7 GB
       - name: Test
-        run: LAYA_CHECKPOINTS= jolt -M:test
+        run: LEV_CHECKPOINTS= jolt -M:test
 
       - name: Test typed-decisions
-        run: LAYA_CHECKPOINTS=typed-decisions jolt -M:test laya.checkpoints-test
+        run: LEV_CHECKPOINTS=typed-decisions jolt -M:test lev.checkpoints-test
 
       - name: Test multilingual
-        run: LAYA_CHECKPOINTS=multilingual jolt -M:test laya.checkpoints-test
+        run: LEV_CHECKPOINTS=multilingual jolt -M:test lev.checkpoints-test

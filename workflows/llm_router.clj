@@ -1,7 +1,7 @@
 (ns workflows.llm-router
   "Route a request to a small or a frontier language model (laya 0.3.0
   presets.router_questions): difficulty, domain, tool needs, sensitivity.
-  Not to be confused with laya.router, which picks a Laya checkpoint.
+  Not to be confused with lev.router, which picks a Laya checkpoint.
   State: {\"request\" text}; a bare string is taken as the request.")
 
 (defn questions

@@ -22,7 +22,7 @@ its options as the criteria, its state as the state.
 
 ## Results, 2026-09-19
 
-10-core M-series laptop. laya-jolt through `bench/authored144.clj`; von-1.0
+10-core M-series laptop. lev through `bench/authored144.clj`; von-1.0
 through its own Python backend (`BertaBackend`, torch 2.14 on the CPU, the
 weights from `wfzyx/von-1.0`); MiniCPM5-2B (`openbmb/MiniCPM5-2B-GGUF`,
 Q8_0) through `llama-server`, one chat completion per case with the answer
