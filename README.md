@@ -341,7 +341,18 @@ jolt -M:run --list                                          # what is loaded, fr
 jolt -M:run refund-risk '{"text": "Charged twice, want my money back"}'
 jolt -M:run refund-risk @ticket.json --options '{"teams": {"billing": "money", "fraud": "chargebacks"}}'
 jolt -M:run refund-risk @ticket.json --constraints '[["implies", ["wants_refund", true], ["team", "billing"]]]'
+jolt -M:run refund-risk @ticket.json --model minicpm5                # on a thinker (--thinking false to answer at once)
 LEV_WORKFLOWS=./my-workflows jolt -M:run refund-risk @ticket.json   # only that directory
+```
+
+One-off decisions without a workflow (von's `decide` / `judge` / `rate`,
+and a whole request from a file):
+
+```
+jolt -M:run decide "Charged twice, want my money back" --choices refund,help,other --instructions "What does the customer want?"
+jolt -M:run judge "Refund me before Friday or we cancel." --instructions "Does the customer threaten to leave?"
+jolt -M:run rate "Refund me before Friday or we cancel." --levels calm,annoyed,furious
+jolt -M:run ask @request.json     # {"state": ..., "questions": {...}, "constraints"?: [...], "thinking"?: ...}
 ```
 
 ### Constraints

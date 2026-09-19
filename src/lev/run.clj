@@ -2,6 +2,10 @@
   "jolt -M:run <workflow> [input] [--options JSON] [--constraints JSON] [--data DIR]
               [--model NAME] [--thinking true|false] [--thinker PATH.gguf]
               [--workflows DIR[:DIR]] [--max-len N] [--head-max-len N]
+   jolt -M:run decide TEXT --choices a,b,c [--instructions ...]      ; one choice
+   jolt -M:run judge TEXT --instructions ...                          ; one probability
+   jolt -M:run rate TEXT --levels low,mid,high [--instructions ...]   ; one score
+   jolt -M:run ask @request.json                                      ; a whole systemone body
    jolt -M:run --list
 
   Run one workflow (lev.workflows) against a model and print the answer
@@ -14,6 +18,7 @@
   --thinker / LEV_THINKER as `thinker`), --thinking its override."
   (:require [clojure.string :as str]
             [lev.agent :as ag]
+            [lev.api :as api]
             [lev.config :as cfg]
             [lev.json :as json]
             [lev.router :as router]
@@ -49,6 +54,39 @@
                     (merge {:constraints (when (or own theirs) (vec (concat own theirs)))}
                            extra-opts)))))
 
+(def one-offs #{"decide" "judge" "rate" "ask"})
+
+(defn- csv [s] (vec (remove str/blank? (map str/trim (str/split (str s) #",")))))
+
+(defn- need [opts flag]
+  (or (let [v (get opts flag)] (when (string? v) v))
+      (throw (ex-info (str flag " is required") {:type :invalid-request :arg flag}))))
+
+(defn one-off
+  "The one-question conveniences as commands: decide (--choices, an
+  --instructions), judge (--instructions), rate (--levels, an
+  --instructions), and ask, a systemone request body (JSON or @path) run as
+  is. `args` are the positionals after the command; answers the choice /
+  score answer map, the probability, or the whole answer map."
+  [agent cmd args opts]
+  (let [text (first args)
+        extra (when (contains? opts "--thinking") {:thinking (= "true" (str (get opts "--thinking")))})]
+    (case cmd
+      "decide" (api/decide agent text (csv (need opts "--choices"))
+                           (get opts "--instructions" "Which option best describes the state?") extra)
+      "judge" (api/judge agent text (need opts "--instructions") nil extra)
+      "rate" (api/rate agent text (csv (need opts "--levels"))
+                       (get opts "--instructions" "Rate where the state falls on this scale:") extra)
+      "ask" (let [body (or (parse-json-arg text "request")
+                           (throw (ex-info "ask needs a request: JSON or @path with state and questions" {:type :invalid-request :arg "request"})))]
+              (when-not (and (map? body) (contains? body "state") (map? (get body "questions")))
+                (throw (ex-info "the request must be an object with state and questions" {:type :invalid-request :arg "request"})))
+              (ag/system-one agent (get body "state") (get body "questions")
+                             (merge {:constraints (get body "constraints") :on-infeasible (get body "on_infeasible")}
+                                    (when (contains? body "thinking") {:thinking (get body "thinking")})
+                                    (when (contains? body "thought") {:thought (get body "thought")})
+                                    extra))))))
+
 (defn list-workflows
   "Print name, source file and description of every workflow under dirs."
   [dirs]
@@ -75,7 +113,9 @@
                                       :checkpoints (into {} (map (fn [n] [n (cfg/limits ctx n)])) router/names)})
               agent (router/load-model rt model)
               extra (when (contains? opts "--thinking") {:thinking (= "true" (str (get opts "--thinking")))})]
-          (println (seq/json-str (run-workflow agent dirs name input (get opts "--options") (get opts "--constraints") extra))))
+          (println (seq/json-str (if (one-offs name)
+                                   (one-off agent name (rest (:args opts)) opts)
+                                   (run-workflow agent dirs name input (get opts "--options") (get opts "--constraints") extra)))))
         (catch Exception e
           (if (#{:invalid-request :invalid-question :invalid-constraint :unknown-model :model-unavailable} (:type (ex-data e)))
             (do (binding [*out* *err*] (println "jolt run:" (ex-message e))) (System/exit 1))

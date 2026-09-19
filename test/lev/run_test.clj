@@ -62,3 +62,31 @@
     (is (str/includes? text "demo"))
     (is (str/includes? text "email"))
     (is (str/includes? text "Email triage") "descriptions come from the questions docstring")))
+
+(deftest one-off-decisions-from-the-command-line
+  ;; von's `von decide / judge / rate` and its request-file eval, as
+  ;; subcommands of the runner
+  (testing "decide: a choice over --choices"
+    (let [out (run/one-off @agent "decide" ["Charged twice, want my money back"]
+                           {"--choices" "refund,help,other" "--instructions" "What does the customer want?"})]
+      (is (= "refund" (get out "choice")))
+      (is (= ["refund" "help" "other"] (keys (get out "probabilities"))))))
+  (testing "judge: the probability"
+    (let [p (run/one-off @agent "judge" ["Refund me before Friday or we cancel."] {"--instructions" "Does the customer threaten to leave?"})]
+      (is (number? p))
+      (is (<= 0.0 p 1.0))))
+  (testing "rate: a score over --levels"
+    (let [out (run/one-off @agent "rate" ["Refund me before Friday or we cancel."] {"--levels" "calm,annoyed,furious"})]
+      (is (= {"0" "calm" "1" "annoyed" "2" "furious"} (get out "legend")))
+      (is (number? (get out "score")))))
+  (testing "ask: a whole systemone request from a file"
+    (spit "target/run-ask.json" "{\"state\": \"Refund me\", \"questions\": {\"q\": {\"type\": \"noul\", \"instructions\": \"Money back?\"}}, \"constraints\": []}")
+    (let [out (run/one-off @agent "ask" ["@target/run-ask.json"] {})]
+      (is (= ["q"] (keys (get out "answers"))))
+      (is (contains? (get-in out ["answers" "q"]) "decided")))
+    (jolt.host/delete-tree! "target/run-ask.json"))
+  (testing "what is missing is said"
+    (is (thrown-with-msg? Exception #"--choices" (run/one-off @agent "decide" ["x"] {})))
+    (is (thrown-with-msg? Exception #"--instructions" (run/one-off @agent "judge" ["x"] {})))
+    (is (thrown-with-msg? Exception #"--levels" (run/one-off @agent "rate" ["x"] {})))
+    (is (thrown-with-msg? Exception #"state" (run/one-off @agent "ask" [] {})))))
