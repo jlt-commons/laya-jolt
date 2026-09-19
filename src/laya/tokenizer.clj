@@ -255,20 +255,19 @@
 
 (defn- lowest-ranked-pair
   "[a b rank] of the adjacent pair with the lowest merge rank, or nil.
-  Written as a loop with a sentinel rank on purpose: a `reduce` whose
-  accumulator starts as nil and is tested with nil? is miscompiled by
-  jolt 0.8.9's release build (`jolt build` without --dev folds the nil?
-  to true and the last pair wins), which broke every BPE merge in the
-  standalone binary. `jolt binary` runs a self-test to catch a regression."
+  A reduce whose accumulator starts as nil and is tested with nil?: jolt
+  0.8.9's release build typed the accumulator from its init alone and
+  folded the nil? to true (the last pair won and every BPE merge in the
+  standalone binary went wrong); 0.8.10 fixed it. `jolt binary` runs the
+  built server's self-test against golden/ so a regression cannot ship."
   [parts ranks]
-  (loop [ps parts best-a nil best-b nil best-r Long/MAX_VALUE]
-    (if (or (empty? ps) (empty? (rest ps)))
-      (when best-a [best-a best-b best-r])
-      (let [a (first ps) b (second ps)
-            r (get ranks [a b])]
-        (if (and r (< (long r) best-r))
-          (recur (rest ps) a b (long r))
-          (recur (rest ps) best-a best-b best-r))))))
+  (reduce (fn [best [a b]]
+            (let [r (get ranks [a b])]
+              (if (and r (or (nil? best) (< (long r) (long (nth best 2)))))
+                [a b r]
+                best)))
+          nil
+          (map vector parts (rest parts))))
 
 (defn apply-bpe
   "GPT-2 BPE: repeatedly merge the adjacent pair with the lowest rank."

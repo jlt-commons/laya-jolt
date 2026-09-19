@@ -361,10 +361,11 @@ first use and keeping `:max-loaded` resident:
 
 `jolt binary` runs `jolt build -m laya.server -o laya-server` with the C
 kernels linked in statically, then runs `./laya-server --self-test` against
-`golden/`. The suite runs interpreted, and jolt 0.8.9's release build
-miscompiles one pattern (a `reduce` whose accumulator starts as `nil` and is
-tested with `nil?` — see `laya.tokenizer/lowest-ranked-pair`), so the binary
-proves itself before it ships. It still needs the prepared data root next
+`golden/`. The suite runs interpreted, and a compiler release can build
+the tree wrong where the interpreter runs it right (jolt 0.8.9 miscompiled a
+`reduce` whose accumulator starts as `nil` and is tested with `nil?`, the
+pattern `laya.tokenizer/lowest-ranked-pair` uses; 0.8.10 fixed it), so the
+binary proves itself before it ships. It still needs the prepared data root next
 to it (or `--data DIR` / `config.edn`), the workflows (`./workflows` relative
 to where it runs, `--workflows`, `LAYA_WORKFLOWS` or `config.edn`, plus
 `~/.config/laya/workflows`; the workflow files are loaded from source at

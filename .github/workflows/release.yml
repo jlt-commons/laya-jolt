@@ -20,9 +20,10 @@ permissions:
 # (Settings -> Variables) to a tag like v0.8.9. No workflow edit, no commit.
 #
 # The self-test matters more here than in most projects: jolt 0.8.9's release
-# build miscompiles one pattern the tokenizer uses (see README, "As a binary"),
-# and the interpreted suite cannot see that. `jolt binary` builds and then runs
-# ./laya-server --self-test against golden/, so a bad binary never ships.
+# build miscompiled one pattern the tokenizer uses (fixed in 0.8.10; see README,
+# "As a binary"), and the interpreted suite cannot see that kind of thing.
+# `jolt binary` builds and then runs ./laya-server --self-test against golden/,
+# so a bad binary never ships.
 
 jobs:
   build:
