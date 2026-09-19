@@ -10,7 +10,7 @@ bundle, and picks the checkpoint per request the way the package's `Router`
 does.
 
 The models are ModernBERT encoders (RoPE, alternating full/sliding
-attention, GeGLU; ModernBERT-large for `english` and `typed-decisions`,
+attention, a GELU-gated MLP; ModernBERT-large for `english` and `typed-decisions`,
 mmBERT-base for `multilingual`) plus a 2-layer decision head, a scorer, and
 an act head. They do not generate text: they consume a serialized `state`
 and a set of typed questions, and return calibrated typed answers.
@@ -80,11 +80,16 @@ jolt binary              # standalone ./laya-server, self-tested against golden/
 `jolt kernels` shells out to `cc`. `jolt prepare` needs only the checkpoints
 and the kernel library; it runs in a few seconds per checkpoint. No Python
 is involved anywhere; `golden/` holds the traces dumped from the torch CPU
-oracle (english at the root, `golden/typed-decisions/` for that checkpoint)
-and is checked in.
+oracle (english at the root, `golden/typed-decisions/` and
+`golden/multilingual/` for the others) and is checked in.
 
-`jolt -M:run demo` prints the quickstart answer JSON. It should be identical
-to the `:system-one` value in `golden/readme.edn`.
+`jolt -M:test` runs everything against whatever is prepared under `data/`;
+`jolt -M:test laya.checkpoints-test` runs one namespace, and
+`LAYA_CHECKPOINTS=typed-decisions` (comma-separated, empty for none)
+restricts the extra-checkpoint parity suite, which is how CI tests one
+checkpoint per process. `jolt -M:run demo` prints the quickstart answer
+JSON: the `:system-one` value in `golden/readme.edn` (byte for byte under
+Accelerate, see Status).
 
 Answers come back as ordered maps with string keys, in the shape of the
 Python dicts. Because option order and question order are part of the model
@@ -108,18 +113,24 @@ variable > `config.edn` > default**. `config.edn` lives in
 `$LAYA_CONFIG_DIR`, else `$XDG_CONFIG_HOME/laya`, else `~/.config/laya`:
 
 ```clojure
-{:data "/Users/me/models/laya-data"      ; prepared model dir: what jolt prepare writes and everything else loads
- :laya-home "/Users/me/models/laya"      ; the Hub checkpoint jolt prepare reads
+{:data "/Users/me/models/laya-data"      ; prepared data root: what jolt prepare writes and everything else loads
+ :laya-home "/Users/me/models/laya"      ; the Hub checkpoints jolt prepare reads
  :workflow-dirs ["/Users/me/src/decisions/workflows"]   ; extra workflow directories
- :port 8080 :host "127.0.0.1" :api-key "s3cret"}       ; server defaults
+ :port 8080 :host "127.0.0.1" :api-key "s3cret"        ; server defaults
+ :max-loaded 2 :default-model "english"                 ; checkpoints kept resident; the one loaded at startup
+ :auto-task-detection false}                            ; route typed-decisions question sets to that checkpoint
 ```
 
 | setting | flag | environment | `config.edn` | default |
 |---|---|---|---|---|
-| prepared model | `--data DIR` | `LAYA_DATA` | `:data` | `data` |
-| checkpoint (prepare) | `--laya DIR` | `LAYA_HOME` | `:laya-home` | `../laya` |
+| prepared data root | `--data DIR` | `LAYA_DATA` | `:data` | `data` |
+| checkpoints (prepare) | `--laya DIR` | `LAYA_HOME` | `:laya-home` | `../laya` |
 | workflow dirs | `--workflows DIR[:DIR]` | `LAYA_WORKFLOWS` | `:workflow-dirs` (adds) | see below |
 | server | `--port` `--host` `--api-key` | `PORT` `LAYA_HOST` `LAYA_API_KEY` | `:port` `:host` `:api-key` | `8080` `127.0.0.1` none |
+| resident checkpoints | `--max-loaded N` | `LAYA_MAX_LOADED` | `:max-loaded` | `1` |
+| startup / fallback checkpoint | `--default-model NAME` | `LAYA_DEFAULT_MODEL` | `:default-model` | `english` |
+| typed-decisions by question ids | `--auto-task-detection` | — | `:auto-task-detection` | off |
+| goldens (`--self-test`) | `--golden DIR` | `LAYA_GOLDEN` | `:golden` | `golden` |
 
 `--workflows` and `LAYA_WORKFLOWS` are the exception to "adds": they name
 exactly the directories to scan, replacing the defaults, so a test or a
@@ -203,8 +214,8 @@ GET  /health              -> {"status": "ok", "model": "laya-rl-agent", "loaded"
 
 Questions and answers have the shapes the Python `Agent.system_one` uses
 (choice / score / noul, plus the `action.act_probability` extension).
-`model` is either absent (or `laya-rl-agent`) to route by content, or a
-checkpoint name / alias (`english`, `multilingual`, `typed-decisions`, `en`,
+`model` is either absent (or the engine's own name, `laya-rl-agent`) to
+route by content, or a checkpoint name / alias (`english`, `multilingual`, `typed-decisions`, `en`,
 `ml`, ...) to pick one; `lang` (`"de"`, `"en-GB"`) and `task`
 (`"typed_decisions"`) are the Router's other hints, in the same precedence
 as upstream: model > task > detected workflow (opt-in) > lang > detected
@@ -271,19 +282,23 @@ kernels linked in statically, then runs `./laya-server --self-test` against
 `golden/`. The suite runs interpreted, and jolt 0.8.9's release build
 miscompiles one pattern (a `reduce` whose accumulator starts as `nil` and is
 tested with `nil?` — see `laya.tokenizer/lowest-ranked-pair`), so the binary
-proves itself before it ships. It still needs `data/` next to it (or
-`--data DIR`), ICU and BLAS from the OS, and libssl/libcrypto for the
-adapter.
+proves itself before it ships. It still needs the prepared data root next
+to it (or `--data DIR` / `config.edn`), the workflows (`./workflows` relative
+to where it runs, `--workflows`, `LAYA_WORKFLOWS` or `config.edn`, plus
+`~/.config/laya/workflows`; the workflow files are loaded from source at
+startup, so they need no rebuild), ICU and BLAS from the OS, and
+libssl/libcrypto for the adapter.
 
 ```
-./laya-server --data data --port 8080 --api-key s3cret
+./laya-server --data data --workflows workflows --port 8080 --api-key s3cret
 ./laya-server --self-test --data data --golden golden
 ```
 
 Tagged releases (`v*`) carry this binary prebuilt for macOS arm64 and Linux
-x86_64, built and self-tested by `.github/workflows/release.yml`. CI runs the
-suite on both platforms on every push, fetching the checkpoint from the Hub at
-the revision `golden/` was dumped from (`.github/actions/setup`).
+x86_64, with `golden/` and `workflows/` alongside, built and self-tested by
+`.github/workflows/release.yml`. CI runs the suite on both platforms on every
+push, fetching the three checkpoints from the Hub at the revision `golden/`
+was dumped from (`.github/actions/setup`).
 
 ## Native dependencies
 
@@ -292,14 +307,18 @@ the build task branches on OS.
 
 - **kernels** — `native/liblaya_kernels.dylib` (mac) / `.so` (linux), built by
   `jolt kernels`.
-- **NFC** — `libicucore.dylib` on mac (unguarded symbols in the system dylib),
-  `libicuuc.so.<ver>` on linux. The tokenizer calls `unorm2` and the
-  `u_charType` / `u_isUWhiteSpace` classifiers. Linux ICU builds append the
+- **ICU** — `libicucore.dylib` on mac (unguarded symbols in the system dylib),
+  `libicuuc.so.<ver>` on linux. The tokenizers call `unorm2` (NFC) and the
+  `u_charType` / `u_isUWhiteSpace` classifiers; language detection and the
+  email workflow use the same classifiers for Python's `str.isalpha` /
+  `\\w` / `\\s`. Linux ICU builds append the
   major version to every symbol (`u_charType_76`); the bindings resolve the
   first spelling that exists, for versions 60..90.
 - **JSON** — `org.clojure/data.json` from Maven, plus `jolt-lang/time` which
   provides the `java.time` classes data.json needs to load. Only `prepare`
-  uses them.
+  uses them; requests are read by `laya.json`, which keeps key order.
+- **HTTP** — `jolt-lang/ring-chez-adapter` serves the API and
+  `org.clojars.askonomm/ruuter` (Clojars) dispatches its routes.
 - **BLAS** — `cblas_sgemm` from the Accelerate framework on mac, OpenBLAS on
   linux.
 
