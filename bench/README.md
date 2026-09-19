@@ -36,14 +36,15 @@ chat template.
 | laya `multilingual` (this port) | 307M | 59.0% (85) | 56.4% | | 48 (CPU) |
 | von-1.0, NLI zero-shot | 395M | 76.4% (110) | 76.4% | 73.1% (79) | 160 (CPU, torch) |
 | MiniCPM5-2B Q8, direct answer | 2.5B | 73.6% (106) | 71.8% | | 566 (CPU) / 89 (Metal) |
-| MiniCPM5-2B Q8, thinking | 2.5B | **97.2% (140)** | 97.6% | | 3,938 mean, 2,759 median (Metal); ~300 tokens of thought |
+| MiniCPM5-2B Q8, thinking | 2.5B | **97.2% (140)** | 97.6% | | 3,938 mean, 2,759 median (Metal); ~9,800 mean, 8,050 median (CPU, 24-case sample); ~300 tokens of thought |
 
 What the numbers say:
 
 - The gap to a hosted generative decision API on hard cases is the
   thinking, not the encoder. Answering directly, the 2.5B decoder is no
   better than von (73.6% vs 76.4%) at 3.5x the CPU time; with ~300 tokens
-  of reasoning it gets 140/144, at 3 s a case on the GPU.
+  of reasoning it gets 140/144, at 3 s a case on the GPU and ~10 s on the
+  CPU.
 - von-1.0 is the same ModernBERT-large encoder this port runs, with an NLI
   head instead of laya's marker head, one pair sequence per option instead
   of one sequence per question. +15 points over laya `english` on this set
