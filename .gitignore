@@ -6,3 +6,7 @@ __pycache__/
 *.o
 .nrepl-port
 .dirge/
+target/
+.jolt/
+.clj-kondo/
+.lsp/

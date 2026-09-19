@@ -1,5 +1,11 @@
 {:paths ["src"]
 
+ ;; data.json reads tokenizer.json / the configs / the safetensors header in
+ ;; `jolt prepare`. It needs java.time at load, which jolt-lang/time provides.
+ :deps {org.clojure/data.json {:mvn/version "2.5.1"}
+        io.github.jolt-lang/time {:git/url "https://github.com/jolt-lang/time.git"
+                                  :git/sha "abeee49974c2c4efa2fa75c96d9a379822c6815f"}}
+
  ;; kernels: built from native/laya_kernels.c by the `kernels` task.
  ;; icu: NFC for the tokenizer. mac ships libicucore in the shared cache;
  ;; linux distros name it libicuuc.so.<ver>.
@@ -33,11 +39,15 @@
 
   prepare
   {:doc "convert the Laya checkpoint (LAYA_HOME, default ../laya) into data/"
-   :task (shell "python3" "python/prepare.py" "--laya" laya-home)}
+   :depends [kernels]
+   :task (shell "jolt" "-M:prepare" "--laya" laya-home "--out" "data")}
 
   traces
-  {:doc "re-dump the golden traces from the torch CPU oracle into golden/"
-   :task (shell ".venv/bin/python" "python/dump_traces.py" "--laya" laya-home)}
+  {:doc "re-dump the golden traces (torch CPU oracle) and the prepare checksums into golden/"
+   :task (do (shell ".venv/bin/python" "python/dump_traces.py" "--laya" laya-home)
+             (shell ".venv/bin/python" "python/prepare.py" "--laya" laya-home
+                    "--out" "target/prepare-oracle" "--golden" "golden/prepare.edn")
+             (fs/delete-tree "target/prepare-oracle"))}
 
   clean-native
   {:doc "remove the compiled kernel library"
@@ -47,4 +57,5 @@
 
  :aliases {:test {:extra-paths ["test"]
                   :main-opts ["-m" "laya.test-runner"]}
-           :run {:main-opts ["-m" "laya.demo"]}}}
+           :run {:main-opts ["-m" "laya.demo"]}
+           :prepare {:main-opts ["-m" "laya.prepare"]}}}

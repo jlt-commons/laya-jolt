@@ -1,0 +1,86 @@
+{:tok-cases [
+  "Which department should handle this email?"
+  " choice question: invoices, payments, refunds"
+  "  leading double space and\ttab"
+  "Don't stop — it's 2024, isn't it? naïve café résumé ﬁne"
+  "unicodé combining acute (NFD source; NFC must fold)"
+  "MixedCASE WithNumbers 123 45.67 and #hashtags @at"
+  "level 0: not urgent"
+  "true: yes, the statement holds"
+  "Duplicate billing on March invoice #4411"
+  "https://example.com/path?q=1&r=2&x=%20"
+  "emoji 😀 and cjk 中文测试"
+  "$1,234.56 —  -99.2e-3  +0.5"
+  "and\tThe end"
+  "line1\nline2"
+  "a\u001cb\u001fc"
+  "x y"
+  "tab\t\tdouble"
+  "nl\n\n\nrun"
+  "a \tb"
+  "DON'T Shout 'S"
+  "end   "
+  "  lead"
+  " sep"
+  "'re're 're"
+  "z\n\n\n\n\nq"
+  "\u000d\nThe"
+]
+ :pre-tok {
+  "Which department should handle this email?" ["Which" " department" " should" " handle" " this" " email" "?"]
+  " choice question: invoices, payments, refunds" [" choice" " question" ":" " invo" "ices" "," " payments" "," " ref" "unds"]
+  "  leading double space and\ttab" ["  " "leading" " double" " space" " and" "\t" "tab"]
+  "Don't stop — it's 2024, isn't it? naïve café résumé ﬁne" ["Don" "'t" " stop" " —" " it" "'s" " 20" "24" "," " isn" "'t" " it" "?" " naïve" " café" " ré" "sum" "é" " �" "�" "�" "ne"]
+  "unicodé combining acute (NFD source; NFC must fold)" ["un" "ic" "od" "é" " combining" " acute" " (" "NF" "D" " source" ";" " NFC" " must" " fold" ")"]
+  "MixedCASE WithNumbers 123 45.67 and #hashtags @at" ["M" "ixed" "CASE" " With" "Numbers" " 123" " 45" "." "67" " and" " #" "has" "ht" "ags" " @" "at"]
+  "level 0: not urgent" ["level" " 0" ":" " not" " urgent"]
+  "true: yes, the statement holds" ["true" ":" " yes" "," " the" " statement" " holds"]
+  "Duplicate billing on March invoice #4411" ["Du" "plicate" " billing" " on" " March" " invoice" " #" "44" "11"]
+  "https://example.com/path?q=1&r=2&x=%20" ["https" "://" "example" "." "com" "/" "path" "?" "q" "=" "1" "&" "r" "=" "2" "&" "x" "=%" "20"]
+  "emoji 😀 and cjk 中文测试" ["emo" "ji" " �" "�" " and" " c" "jk" " " "中" "文" "�" "�" "�" "�"]
+  "$1,234.56 —  -99.2e-3  +0.5" ["$" "1" "," "234" "." "56" " —" "  " "-" "99" "." "2" "e" "-" "3" "  " "+" "0" "." "5"]
+  "and\tThe end" ["and" "\t" "The" " end"]
+  "line1\nline2" ["line" "1" "\n" "line" "2"]
+  "a\u001cb\u001fc" ["a" "\u001c" "b" "\u001f" "c"]
+  "x y" ["x" " " "y"]
+  "tab\t\tdouble" ["tab" "\t" "\t" "double"]
+  "nl\n\n\nrun" ["nl" "\n\n" "\n" "run"]
+  "a \tb" ["a" " " "\t" "b"]
+  "DON'T Shout 'S" ["DON" "'" "T" " Sh" "out" " '" "S"]
+  "end   " ["end" "   "]
+  "  lead" [" " " " "lead"]
+  " sep" [" " "sep"]
+  "'re're 're" ["'re" "'re" " '" "re"]
+  "z\n\n\n\n\nq" ["z" "\n\n\n\n" "\n" "q"]
+  "\u000d\nThe" ["\u000d" "\n" "The"]
+}
+ :pre-tokens {
+  "Which department should handle this email?" ["Which" " department" " should" " handle" " this" " email" "?"]
+  " choice question: invoices, payments, refunds" [" choice" " question" ":" " invoices" "," " payments" "," " refunds"]
+  "  leading double space and\ttab" [" " " leading" " double" " space" " and" "\t" "tab"]
+  "Don't stop — it's 2024, isn't it? naïve café résumé ﬁne" ["Don" "'t" " stop" " —" " it" "'s" " 2024" "," " isn" "'t" " it" "?" " naïve" " café" " résumé" " ﬁne"]
+  "unicodé combining acute (NFD source; NFC must fold)" ["unicode" "́" " combining" " acute" " (" "NFD" " source" ";" " NFC" " must" " fold" ")"]
+  "MixedCASE WithNumbers 123 45.67 and #hashtags @at" ["MixedCASE" " WithNumbers" " 123" " 45" "." "67" " and" " #" "hashtags" " @" "at"]
+  "level 0: not urgent" ["level" " 0" ":" " not" " urgent"]
+  "true: yes, the statement holds" ["true" ":" " yes" "," " the" " statement" " holds"]
+  "Duplicate billing on March invoice #4411" ["Duplicate" " billing" " on" " March" " invoice" " #" "4411"]
+  "https://example.com/path?q=1&r=2&x=%20" ["https" "://" "example" "." "com" "/" "path" "?" "q" "=" "1" "&" "r" "=" "2" "&" "x" "=%" "20"]
+  "emoji 😀 and cjk 中文测试" ["emoji" " 😀" " and" " cjk" " 中文测试"]
+  "$1,234.56 —  -99.2e-3  +0.5" ["$" "1" "," "234" "." "56" " —" " " " -" "99" "." "2" "e" "-" "3" " " " +" "0" "." "5"]
+  "and\tThe end" ["and" "\t" "The" " end"]
+  "line1\nline2" ["line" "1" "\n" "line" "2"]
+  "a\u001cb\u001fc" ["a" "\u001c" "b" "\u001f" "c"]
+  "x y" ["x" " " "y"]
+  "tab\t\tdouble" ["tab" "\t" "\t" "double"]
+  "nl\n\n\nrun" ["nl" "\n\n" "\n" "run"]
+  "a \tb" ["a" " " "\t" "b"]
+  "DON'T Shout 'S" ["DON" "'" "T" " Shout" " '" "S"]
+  "end   " ["end" "   "]
+  "  lead" [" " " " "lead"]
+  " sep" [" " "sep"]
+  "'re're 're" ["'re" "'re" " '" "re"]
+  "z\n\n\n\n\nq" ["z" "\n\n\n\n" "\n" "q"]
+  "\u000d\nThe" ["\u000d" "\n" "The"]
+}
+ :readme-state {"from" "customer@acme.com" "subject" "Duplicate billing on March invoice #4411" "body" "Hi team, we were billed twice for March. Please refund the duplicate before Friday or we will cancel our plan."}
+ :readme-questions {"department" {"type" "choice" "instructions" "Which department should handle this email?" "criteria" {"billing" "invoices, payments, refunds" "technical" "bugs, outages, integrations" "sales" "pricing, contracts, demos" "other" "everything else"}} "urgency" {"type" "score" "instructions" "How urgent is this request?" "criteria" ["not urgent" "soon" "critical deadline or blocking issue"]} "churn_risk" {"type" "noul" "instructions" "Does the user threaten to cancel or switch to a competitor?"} "is_phishing" {"type" "noul" "instructions" "Is this email a phishing or scam attempt?"}}}

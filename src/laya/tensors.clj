@@ -61,9 +61,22 @@
 (defn shape [t] (:shape t))
 (defn size [t] (:size t))
 
+(def ^:dynamic *arena*
+  "When bound to an ffi arena, every tensor made here is owned by it and is
+  released when the arena closes. A forward pass allocates hundreds of MB of
+  intermediates; model/forward-row binds one arena per row so none of it
+  outlives the call. Unbound (nil) means caller-owned malloc, which is what
+  weights and cached rope tables want."
+  nil)
+
+(defn alloc-bytes
+  "Zeroed native memory, owned by *arena* when one is bound."
+  [n]
+  (if *arena* (ffi/alloc *arena* n) (ffi/alloc n)))
+
 (defn make
   [shape]
-  {:p (ffi/alloc (* 4 (apply * shape)))
+  {:p (alloc-bytes (* 4 (apply * shape)))
    :shape (vec shape)
    :size (apply * shape)})
 
@@ -88,7 +101,7 @@
   "int64 buffer for ids (embedding lookup indices)."
   [xs]
   (let [n (count xs)
-        t {:p (ffi/alloc (* 8 n)) :shape [n] :size n}]
+        t {:p (alloc-bytes (* 8 n)) :shape [n] :size n}]
     (dotimes [i n]
       (ffi/write (:p t) :int64 (long (nth xs i)) (* 8 i)))
     t))
@@ -98,7 +111,7 @@
   ([xs] (from-bytes xs [(count xs)]))
   ([xs shape]
    (let [n (count xs)
-         t {:p (ffi/alloc n) :shape (vec shape) :size (apply * shape)}]
+         t {:p (alloc-bytes n) :shape (vec shape) :size (apply * shape)}]
      (dotimes [i n]
        (ffi/write (:p t) :uint8 (byte (nth xs i)) i))
      t)))
@@ -116,8 +129,9 @@
         len (.length f)]
     (when-not (= len expected)
       (throw (ex-info "file size mismatch" {:path path :expected expected :got len})))
-    ;; io/file + Files/readAllBytes shim: copy the raw bytes then write-array
-    (let [t (make shape)
+    ;; io/file + Files/readAllBytes shim: copy the raw bytes then write-array.
+    ;; Weights live for the whole process: never arena-owned.
+    (let [t (binding [*arena* nil] (make shape))
           bytes (java.nio.file.Files/readAllBytes (.toPath (io/file path)))]
       (ffi/write-array (:p t) bytes)
       t)))
@@ -219,7 +233,7 @@
 (defn byte-matrix
   "uint8 matrix [r x c] in a raw byte buffer."
   [r c]
-  {:p (ffi/alloc (* r c)) :shape [r c] :size (* r c)})
+  {:p (alloc-bytes (* r c)) :shape [r c] :size (* r c)})
 
 (defn allowed-mask
   "Allowed matrix [L x L] for batch row b: full when window<0, else |i-j|<=window."

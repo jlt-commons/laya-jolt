@@ -342,3 +342,123 @@ float lla_max_abs_diff(const float *a, const float *b, int64_t n) {
     }
     return m;
 }
+
+/* ---------------- prepare: checkpoint conversion ---------------- */
+/* Used by laya.prepare (jolt prepare): model.safetensors is F16 (one F32
+ * buffer), stored little-endian. Widening F16->F32 is exact; the byte
+ * order is handled explicitly so the output is little-endian on any host. */
+#include <stdio.h>
+
+/* f16 bits -> f32 bits. Same as numpy's npy_halfbits_to_floatbits: exact
+ * for every finite value, subnormals renormalized, inf kept, NaN payloads
+ * shifted up by 13 bits so the blobs match a numpy astype(float32). */
+static uint32_t lla_h2f_bits(uint32_t h) {
+    uint32_t sgn = (h & 0x8000u) << 16;
+    uint32_t exp = (h >> 10) & 0x1fu;
+    uint32_t sig = h & 0x3ffu;
+    if (exp == 0) {
+        if (sig == 0) return sgn;
+        int e = 0;
+        do { sig <<= 1; e++; } while ((sig & 0x400u) == 0);
+        return sgn | ((uint32_t)(127 - 15 - e + 1) << 23) | ((sig & 0x3ffu) << 13);
+    }
+    if (exp == 0x1fu) return sgn | 0x7f800000u | (sig << 13);
+    return sgn | ((exp + 112u) << 23) | (sig << 13);
+}
+
+/* Widen `count` f16 values found at byte `offset` of `in` into raw f32 at
+ * `out`. Returns the number of values written, or -1 on any I/O error. */
+int64_t lla_f16_file_to_f32(const char *in, int64_t offset, int64_t count,
+                            const char *out) {
+    FILE *fi = fopen(in, "rb");
+    if (!fi) return -1;
+    FILE *fo = fopen(out, "wb");
+    if (!fo) { fclose(fi); return -1; }
+    if (fseeko(fi, (off_t)offset, SEEK_SET) != 0) { fclose(fi); fclose(fo); return -1; }
+    enum { CH = 1 << 16 };
+    uint8_t *ib = malloc(CH * 2);
+    uint8_t *ob = malloc(CH * 4);
+    int64_t done = 0;
+    while (done < count) {
+        size_t want = (size_t)((count - done) < CH ? (count - done) : CH);
+        if (fread(ib, 2, want, fi) != want) { done = -1; break; }
+        for (size_t i = 0; i < want; i++) {
+            uint32_t h = (uint32_t)ib[2 * i] | ((uint32_t)ib[2 * i + 1] << 8);
+            uint32_t f = lla_h2f_bits(h);
+            ob[4 * i] = (uint8_t)f; ob[4 * i + 1] = (uint8_t)(f >> 8);
+            ob[4 * i + 2] = (uint8_t)(f >> 16); ob[4 * i + 3] = (uint8_t)(f >> 24);
+        }
+        if (fwrite(ob, 4, want, fo) != want) { done = -1; break; }
+        done += (int64_t)want;
+    }
+    free(ib); free(ob);
+    fclose(fi);
+    if (fclose(fo) != 0) return -1;
+    return done;
+}
+
+/* Copy `nbytes` at `offset` of `in` to `out` verbatim (F32 tensors).
+ * Returns bytes copied, or -1. */
+int64_t lla_copy_file_range(const char *in, int64_t offset, int64_t nbytes,
+                            const char *out) {
+    FILE *fi = fopen(in, "rb");
+    if (!fi) return -1;
+    FILE *fo = fopen(out, "wb");
+    if (!fo) { fclose(fi); return -1; }
+    if (fseeko(fi, (off_t)offset, SEEK_SET) != 0) { fclose(fi); fclose(fo); return -1; }
+    enum { CH = 1 << 18 };
+    uint8_t *buf = malloc(CH);
+    int64_t done = 0;
+    while (done < nbytes) {
+        size_t want = (size_t)((nbytes - done) < CH ? (nbytes - done) : CH);
+        if (fread(buf, 1, want, fi) != want || fwrite(buf, 1, want, fo) != want) { done = -1; break; }
+        done += (int64_t)want;
+    }
+    free(buf);
+    fclose(fi);
+    if (fclose(fo) != 0) return -1;
+    return done;
+}
+
+/* Read `n` bytes at `offset` of `path` into dst. Returns bytes read or -1.
+ * (the safetensors header: 8-byte LE length + JSON) */
+int64_t lla_read_file_range(const char *path, int64_t offset, int64_t n, uint8_t *dst) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    if (fseeko(f, (off_t)offset, SEEK_SET) != 0) { fclose(f); return -1; }
+    size_t got = fread(dst, 1, (size_t)n, f);
+    fclose(f);
+    return (int64_t)got;
+}
+
+/* zlib-compatible CRC-32 of a whole file (poly 0xEDB88320); *size_out gets
+ * the byte length. Returns the CRC, or -1 if the file cannot be read. The
+ * prepare parity test compares against zlib.crc32 values pinned in
+ * golden/prepare.edn. */
+int64_t lla_file_crc32(const char *path, int64_t *size_out) {
+    static uint32_t table[256];
+    static int init = 0;
+    if (!init) {
+        for (uint32_t i = 0; i < 256; i++) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; k++) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+            table[i] = c;
+        }
+        init = 1;
+    }
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    enum { CH = 1 << 18 };
+    uint8_t *buf = malloc(CH);
+    uint32_t crc = 0xFFFFFFFFu;
+    int64_t size = 0;
+    size_t got;
+    while ((got = fread(buf, 1, CH, f)) > 0) {
+        for (size_t i = 0; i < got; i++) crc = table[(crc ^ buf[i]) & 0xffu] ^ (crc >> 8);
+        size += (int64_t)got;
+    }
+    free(buf);
+    fclose(f);
+    if (size_out) *size_out = size;
+    return (int64_t)(crc ^ 0xFFFFFFFFu);
+}

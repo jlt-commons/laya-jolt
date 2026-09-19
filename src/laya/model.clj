@@ -35,7 +35,8 @@
                 (:rope-local cfg))
         k [theta L]]
     (or (get @rope-cache k)
-        (let [ts (t/rope-tables theta (:head-dim cfg) L)]
+        ;; cached across calls, so not owned by the per-row arena
+        (let [ts (binding [t/*arena* nil] (t/rope-tables theta (:head-dim cfg) L))]
           (swap! rope-cache assoc k ts)
           ts))))
 
@@ -114,10 +115,10 @@
 
 ;; --- head ---------------------------------------------------------------------
 
-(defn- top2
-  "Two largest values of a float seq, largest first."
+(defn top2
+  "Two largest values of a float seq, largest first (torch topk(2).values)."
   [xs]
-  (reduce (fn [[a b] x] (cond (> x a) [x a] (> b x) [a x] :else [a b]))
+  (reduce (fn [[a b] x] (cond (> x a) [x a] (> x b) [a x] :else [a b]))
           [##-Inf ##-Inf]
           xs))
 
@@ -204,11 +205,8 @@
         mask (vec marker-mask)
         k (max 2 (count (filter pos? mask)))
         [t1 t2] (top2 ps)
-        ent (->> ps
-                 (map (fn [p] (if (pos? p) (* p (Math/log (max p 1e-9))) 0.0)))
-                 (reduce +)
-                 (- )
-                 (/ (Math/log k)))
+        ent (/ (- (reduce + (map (fn [p] (if (pos? p) (* p (Math/log (max p 1e-9))) 0.0)) ps)))
+               (Math/log k))
         top1 (if (= t1 ##-Inf) 0.0 t1)
         top2v (if (= t2 ##-Inf) 0.0 t2)]
     [top1 (- top1 top2v) ent (/ k 255.0)]))
@@ -216,22 +214,25 @@
 (defn forward-row
   "One batch row through encoder + decision head.
   ids-row/att-row are [L] seqs; marker-pos/marker-mask are [kmax] seqs.
-  Returns [logits act-logits] as float vectors."
+  Returns [logits act-logits] as float vectors. Every intermediate tensor is
+  owned by an arena that closes on return, so the call leaks nothing."
   [w cfg ids-row att-row marker-pos marker-mask qtype]
-  (let [d (:hidden-size cfg)
-        L (count ids-row)
-        att-t (t/from-bytes att-row)
-        h (encode-row w cfg (t/from-ints ids-row) att-t)
-        _ (t/add-qtype! h (w "type_emb.weight")
-                        (t/from-ints (vec (repeat L qtype))) L d)
-        allowed (t/allowed-mask att-t 0 L -1)
-        h2 (reduce (fn [hh li] (head-layer! w cfg li hh allowed))
-                   h (range (:head-layers cfg)))
-        kmax (count marker-pos)
-        kpos (mapv #(max 0 (long %)) marker-pos)
-        m (t/gather h2 (t/from-ints kpos) kmax d)
-        lg (t/to-floats (scorer w m))
-        lgv (mapv (fn [v msk] (if (pos? (long msk)) v -1e4)) lg marker-mask)
-        feats (answer-features (t/from-floats lgv) marker-mask)
-        pooled (t/gather h2 (t/from-ints [0]) 1 d)]
-    [lgv (t/to-floats (act-head w pooled feats))]))
+  (with-open [arena (ffi/confined-arena)]
+    (binding [t/*arena* arena]
+      (let [d (:hidden-size cfg)
+            L (count ids-row)
+            att-t (t/from-bytes att-row)
+            h (encode-row w cfg (t/from-ints ids-row) att-t)
+            _ (t/add-qtype! h (w "type_emb.weight")
+                            (t/from-ints (vec (repeat L qtype))) L d)
+            allowed (t/allowed-mask att-t 0 L -1)
+            h2 (reduce (fn [hh li] (head-layer! w cfg li hh allowed))
+                       h (range (:head-layers cfg)))
+            kmax (count marker-pos)
+            kpos (mapv #(max 0 (long %)) marker-pos)
+            m (t/gather h2 (t/from-ints kpos) kmax d)
+            lg (t/to-floats (scorer w m))
+            lgv (mapv (fn [v msk] (if (pos? (long msk)) v -1e4)) lg marker-mask)
+            feats (answer-features (t/from-floats lgv) marker-mask)
+            pooled (t/gather h2 (t/from-ints [0]) 1 d)]
+        [lgv (t/to-floats (act-head w pooled feats))]))))

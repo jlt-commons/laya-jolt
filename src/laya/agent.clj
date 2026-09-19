@@ -14,17 +14,25 @@
         tok (tk/load (str data-dir "/tokenizer.edn"))]
     {:cfg cfg :tok tok :w (m/load-weights manifest data-dir)}))
 
-(defn- to-internal
-  "Jev question def -> {:t :ins :crit} (rl_agent_api.RLAgent._to_internal)."
+(defn- qget
+  "Question defs may carry keyword keys (Clojure literals) or string keys
+  (parsed JSON, as the Python API receives them)."
+  [qdef k]
+  (if (contains? qdef k) (get qdef k) (get qdef (name k))))
+
+(defn to-internal
+  "Jev question def -> {:t :ins :crit} (rl_agent_api.RLAgent._to_internal).
+  A list of choice criteria becomes {c: None}; non-string instructions are
+  json.dumps'd with its default ensure_ascii=True."
   [qdef]
-  (let [t (:type qdef)
-        crit (:criteria qdef)
-        crit (if (and (= t "choice") (vector? crit))
-               (into (array-map) (map (fn [c] [c nil])) crit)
+  (let [t (qget qdef :type)
+        crit (qget qdef :criteria)
+        crit (if (and (= t "choice") (sequential? crit))
+               (seq/ordered-map (map (fn [c] [c nil]) crit))
                crit)]
     {:t t
-     :ins (let [ins (:instructions qdef)]
-            (if (string? ins) ins (seq/json-str ins)))
+     :ins (let [ins (qget qdef :instructions)]
+            (if (string? ins) ins (seq/json-str ins {:ensure-ascii true})))
      :crit crit}))
 
 (defn- round4 [x] (/ (double (Math/round (* 1e4 (double x)))) 1e4))
@@ -55,16 +63,14 @@
       (let [ks (mapv key-str (keys (:crit q)))]
         (array-map "type" "choice"
                    "choice" (nth ks (argmax p))
-                   "probabilities" (into (array-map)
-                                         (map-indexed (fn [i c] [c (round4 (nth p i))]) ks))
+                   "probabilities" (seq/ordered-map (map-indexed (fn [i c] [c (round4 (nth p i))]) ks))
                    "confidence" (round4 (confidence p k))
                    "rl_agent" ext))
       "score"
       (array-map "type" "score"
                  "score" (round4 (reduce + (map-indexed (fn [i pi] (* i pi)) p)))
-                 "legend" (into (array-map) (map-indexed (fn [i c] [(str i) c]) (:crit q)))
-                 "probabilities" (into (array-map)
-                                       (map-indexed (fn [i pi] [(str i) (round4 pi)]) p))
+                 "legend" (seq/ordered-map (map-indexed (fn [i c] [(str i) c]) (:crit q)))
+                 "probabilities" (seq/ordered-map (map-indexed (fn [i pi] [(str i) (round4 pi)]) p))
                  "confidence" (round4 (confidence p k))
                  "rl_agent" ext)
       (array-map "type" "noul"
@@ -81,11 +87,15 @@
                                [ids markers] (seq/build-sequence tok state q
                                                                  (:max-len cfg)
                                                                  (:head-max-len cfg))]
+                           (when (not= (count markers) (count (seq/render-options q)))
+                             (throw (ex-info (format "question %s: options do not fit in head_max_len=%d tokens"
+                                                     (pr-str qid) (:head-max-len cfg))
+                                             {:qid qid :head-max-len (:head-max-len cfg)})))
                            {:qid qid :q q :ids ids :markers markers :qtype (seq/qtypes (:t q))}))
                        qids)
         n-tokens (reduce + (map #(count (:ids %)) prepared))
-        answers (reduce
-                 (fn [acc {:keys [qid q ids markers qtype]}]
+        answers (seq/ordered-map
+                 (for [{:keys [qid q ids markers qtype]} prepared]
                    (let [k (count markers)
                          [logits act] (m/forward-row w cfg ids (vec (repeat (count ids) 1))
                                                      markers (vec (repeat k 1)) qtype)
@@ -94,9 +104,7 @@
                                    (nth (:temperature cfg) qtype))
                          p (softmax (mapv #(/ (double %) temp) (take k logits)))
                          actp (first (softmax act))]
-                     (assoc acc qid (answer-for q p k actp))))
-                 (array-map)
-                 prepared)]
+                     [qid (answer-for q p k actp)])))]
     (array-map "model" "rl-agent"
                "answers" answers
                "usage" (array-map "input_tokens" n-tokens "output_tokens" 0))))

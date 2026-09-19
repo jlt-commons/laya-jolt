@@ -5,6 +5,9 @@
 (def test-namespaces
   '[laya.tensors-test
     laya.tokenizer-test
+    laya.sequence-test
+    laya.email-test
+    laya.prepare-test
     laya.agent-test])
 
 (defn -main

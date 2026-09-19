@@ -1,0 +1,57 @@
+{:ids [[50281 22122 1953 27 6758 7811 943 6016 436 4579 32 50282 50284 33484 27 29838 1271 13 10762 13 1275 41748 50284 7681 27 19775 285 562 1131 50284 6224 27 20910 285 1471 375 50284 643 27 3253 2010 50282 9819 19091 1381 346 24900 21821 33484 327 3919 45156 1852 2031 883 995 346 2915 1381 346 1231 497 47045 7019 323 3919 15 7764 23005 253 21036 449 94 50282] [50281 79 3941 1953 27 9876 253 2608 29138 281 14002 32 50282 50284 3221 27 642 13 253 3908 1057 417 2186 50284 2032 27 4754 13 253 3908 6556 50282 9819 19091 1381 346 24900 21821 33484 327 3919 45156 1852 2031 883 995 346 2915 1381 346 1231 497 47045 7019 323 3919 15 7764 23005 253 21036 449 94 50282 50283 50283 50283 50283 50283 50283 50283 50283 50283 50283]]
+ :att [[1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1] [1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0]]
+ :marker-pos [[12 22 29 36] [13 23 0 0]]
+ :marker-mask [[1 1 1 1] [1 1 0 0]]
+ :qtype [0 2]
+ :layer-0-stats [46.9876366 406.687239]
+ :layer-1-stats [85.2355194 508.463239]
+ :layer-2-stats [83.1399612 559.998901]
+ :layer-3-stats [76.4140167 595.629714]
+ :layer-4-stats [75.5202637 683.799395]
+ :layer-5-stats [1566.3916 2583.26315]
+ :layer-6-stats [1692.06616 3539.54078]
+ :layer-7-stats [3115.6228 6369.25191]
+ :layer-8-stats [3219.33325 6635.01807]
+ :layer-9-stats [3273.01758 6796.63142]
+ :layer-10-stats [3325.7124 6929.96592]
+ :layer-11-stats [3311.49243 6904.50541]
+ :layer-12-stats [3291.85986 6450.42863]
+ :layer-13-stats [3285.62207 6464.22846]
+ :layer-14-stats [9853.05859 23970.7271]
+ :layer-15-stats [9854.83398 24045.8864]
+ :layer-16-stats [9849.85449 24089.9389]
+ :layer-17-stats [9848.31152 24090.6464]
+ :layer-18-stats [9843.10938 25639.4548]
+ :layer-19-stats [27588.7441 74214.7823]
+ :layer-20-stats [27595.3242 74243.4348]
+ :layer-21-stats [27593.0781 74241.3387]
+ :layer-22-stats [27607.0527 74298.6584]
+ :layer-23-stats [27608.8301 74344]
+ :layer-24-stats [27610.4746 74373.6754]
+ :layer-25-stats [27615.0488 74403.5992]
+ :layer-26-stats [27618.9863 74470.0494]
+ :layer-27-stats [27615.9648 74470.7893]
+ :act-feats [[0.999552071 0.999396682 0.00316907093 0.0156862754] [0.980689049 0.961378098 0.137554035 0.00784313772]]
+ :relu-vs-gelu-gap 0.0217828751
+ :embeddings {:shape [2 74 1024] :file "layers/embeddings.f32"}
+ :layer-0 {:shape [2 74 1024] :file "layers/layer-0.f32"}
+ :layer-1 {:shape [2 74 1024] :file "layers/layer-1.f32"}
+ :layer-2 {:shape [2 74 1024] :file "layers/layer-2.f32"}
+ :layer-27 {:shape [2 74 1024] :file "layers/layer-27.f32"}
+ :final-norm {:shape [2 74 1024] :file "layers/final-norm.f32"}
+ :rope-full-cos {:shape [74 64] :file "layers/rope-full-cos.f32"}
+ :rope-full-sin {:shape [74 64] :file "layers/rope-full-sin.f32"}
+ :rope-sliding-cos {:shape [74 64] :file "layers/rope-sliding-cos.f32"}
+ :rope-sliding-sin {:shape [74 64] :file "layers/rope-sliding-sin.f32"}
+ :mask-full {:shape [2 1 74 74] :file "layers/mask-full.f32"}
+ :mask-sliding {:shape [2 1 74 74] :file "layers/mask-sliding.f32"}
+ :head-in {:shape [2 74 1024] :file "layers/head-in.f32"}
+ :head-layer-0 {:shape [2 74 1024] :file "layers/head-layer-0.f32"}
+ :head-layer-1 {:shape [2 74 1024] :file "layers/head-layer-1.f32"}
+ :markers {:shape [2 4 1024] :file "layers/markers.f32"}
+ :logits {:shape [2 4] :file "layers/logits.f32"}
+ :act-softmax {:shape [2 2] :file "layers/act-softmax.f32"}
+ :matmul-x {:shape [8 1024] :file "layers/matmul-x.f32"}
+ :matmul {:shape [8 1024] :file "layers/matmul.f32"}
+ :gelu-logits {:shape [2 4] :file "layers/gelu-logits.f32"}
+}

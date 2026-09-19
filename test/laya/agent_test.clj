@@ -7,7 +7,7 @@
   local_attention=128 the mask radius is 64 (torch: config.sliding_window =
   local_attention // 2), and a wrong radius silently corrupts every sliding
   layer beyond ~65 tokens."
-  (:require [clojure.string :as str]
+  (:require [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]
             [laya.agent :as ag]
             [laya.sequence :as seq]))
@@ -43,16 +43,45 @@
                   :instructions "Is this email a phishing or scam attempt?"}))
 
 (defn- golden-system-one
-  "The :system-one JSON embedded in golden/readme.edn (raw, not EDN)."
+  "json.dumps(RLAgent.system_one(...)) as captured in golden/readme.edn."
   []
-  (let [r (slurp (str golden-dir "/readme.edn"))
-        i (str/index-of r ":system-one ")
-        j (str/last-index-of r "}")]
-    (str/trim (subs r (+ i (count ":system-one ")) j))))
+  (:system-one (edn/read-string (slurp (str golden-dir "/readme.edn")))))
 
 (deftest sliding-window-is-half-local-attention
   (testing "encoder sliding radius = local_attention // 2 = 64"
     (is (= 64 (:window (:cfg @agent))))))
+
+(deftest to-internal-mirrors-python
+  (testing "list criteria become {c: None}; non-string instructions are json.dumps'd (ascii)"
+    (is (= {:t "choice" :ins "pick" :crit (array-map "a" nil "b" nil)}
+           (ag/to-internal {:type "choice" :instructions "pick" :criteria ["a" "b"]})))
+    (is (= {:t "choice" :ins "pick" :crit (array-map "a" nil "b" nil)}
+           (ag/to-internal {:type "choice" :instructions "pick" :criteria '("a" "b")})))
+    (is (= "{\"rule\": \"caf\\u00e9\"}"
+           (:ins (ag/to-internal {:type "noul" :instructions {"rule" "café"}})))))
+  (testing "string keys (a question map parsed from JSON) are accepted too"
+    (is (= {:t "score" :ins "how" :crit ["a" "b"]}
+           (ag/to-internal {"type" "score" "instructions" "how" "criteria" ["a" "b"]})))))
+
+(deftest options-must-fit-in-head
+  (testing "ValueError parity: more options than head_max_len/max_len can hold"
+    (let [many (seq/ordered-map (map (fn [i] [(str "option-" i) nil]) (range 200)))
+          qs (array-map "q" {:type "choice" :instructions "pick one" :criteria many})]
+      (is (thrown-with-msg? Exception #"do not fit in head_max_len"
+                            (ag/system-one @agent "state" qs))))))
+
+(deftest wide-choice-keeps-option-order
+  (testing "past 8 options (and 8 questions) the answer maps must still follow input order"
+    (let [opts ["billing" "refund" "bug" "outage" "login" "pricing" "demo"
+                "hiring" "payroll" "legal" "shipping" "returns" "feedback" "other"]
+          q {:type "choice" :instructions "Pick the closest topic." :criteria opts}
+          qs (seq/ordered-map (map (fn [i] [(str "q" i) q]) (range 9)))
+          out (ag/system-one @agent "Refund the duplicate March invoice, please." qs)]
+      (is (= (map #(str "q" %) (range 9)) (keys (get out "answers"))))
+      (is (= opts (keys (get-in out ["answers" "q0" "probabilities"]))))
+      (is (= 14 (count (get-in out ["answers" "q0" "probabilities"]))))
+      (is (contains? (set opts) (get-in out ["answers" "q0" "choice"])))
+      (is (= (get-in out ["answers" "q0"]) (get-in out ["answers" "q8"])) "same question, same answer"))))
 
 (deftest system-one-matches-readme
   (let [out (ag/system-one @agent state questions)]

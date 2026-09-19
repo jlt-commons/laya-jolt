@@ -6,20 +6,38 @@
   lowest-rank-first BPE merges.
 
   Encoding parity is pinned by golden/tok.edn (input_ids from the real
-  transformers fast tokenizer on 12 tricky cases)."
+  transformers fast tokenizer on 26 tricky cases) and the scanner by the
+  ByteLevel pre-tokenizer boundaries in golden/cases.edn."
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
             [jolt.ffi :as ffi]))
 
 ;; --- ICU: NFC + character classes ---------------------------------------------
 
-(ffi/defcfn unorm2-get-instance* "unorm2_getNFCInstance" [] :pointer)
-(ffi/defcfn unorm2-normalize* "unorm2_normalize"
+(defmacro ^:private deficu
+  "defcfn for an ICU symbol. mac's libicucore exports plain names; linux ICU
+  builds append the major version (u_charType_76), so resolve the first name
+  that exists at expansion time. Extend the version list if your ICU is newer."
+  [name csym argtypes rettype]
+  (let [candidates (cons csym (map #(str csym "_" %) (range 90 59 -1)))
+        found (some #(when (ffi/find-symbol %) %) candidates)]
+    (when-not found
+      (throw (ex-info (str "ICU symbol not found: " csym
+                           " (is libicuuc / libicucore declared in :jolt/native?)")
+                      {:symbol csym})))
+    `(def ~name (ffi/foreign-fn ~found ~argtypes ~rettype))))
+
+(deficu unorm2-get-instance* "unorm2_getNFCInstance" [] :pointer)
+(deficu unorm2-normalize* "unorm2_normalize"
   [:pointer :pointer :int32 :pointer :int32 :pointer] :int32)
-(ffi/defcfn u-char-type* "u_charType" [:int32] :int32)
-(ffi/defcfn u-isspace* "u_isspace" [:int32] :int32)
+(deficu u-char-type* "u_charType" [:int32] :int32)
+;; White_Space property == regex \\s. NOT u_isspace, which also admits the
+;; U+001C..U+001F separators that the GPT-2 pattern treats as ordinary chars.
+(deficu u-is-uwhitespace* "u_isUWhiteSpace" [:int32] :int8)
 
 (def nfc-instance (delay (unorm2-get-instance*)))
+
+(def ^:private U_BUFFER_OVERFLOW_ERROR 15)
 
 (defn utf8->u16
   "Codepoint string -> vector of UTF-16 code units."
@@ -61,22 +79,31 @@
     s
     (let [units (utf8->u16 s)
           n (count units)
-          src (ffi/alloc (* 2 (max n 1)))
-          dst (ffi/alloc (* 2 (+ n 32)))
-          err (ffi/alloc 4)]
-      (dotimes [i n]
-        (ffi/write src :uint16 (bit-and 0xFFFF (nth units i)) (* 2 i)))
-      (let [ret (unorm2-normalize* @nfc-instance src (int n)
-                                   dst (int (+ n 32)) err)
-            code (ffi/read err :int32 0)]
-        (when (not (zero? code))
-          (throw (ex-info "unorm2_normalize failed" {:code code})))
-        (u16->string (mapv #(ffi/read dst :uint16 (* 2 %)) (range ret)))))))
+          ;; NFC can grow a string (composition exclusions decompose without
+          ;; recomposing), by at most 3x. Start there; retry on overflow with
+          ;; the length ICU reports, so no input can fail on buffer size.
+          normalize (fn [cap]
+                      (with-open [a (ffi/confined-arena)]
+                        (let [src (ffi/alloc a (* 2 (max n 1)))
+                              dst (ffi/alloc a (* 2 cap))
+                              err (ffi/alloc a 4)]
+                          (dotimes [i n]
+                            (ffi/write src :uint16 (bit-and 0xFFFF (nth units i)) (* 2 i)))
+                          (let [ret (unorm2-normalize* @nfc-instance src (int n)
+                                                       dst (int cap) err)
+                                code (ffi/read err :int32 0)]
+                            (cond
+                              (zero? code)
+                              (u16->string (mapv #(ffi/read dst :uint16 (* 2 %)) (range ret)))
+                              (= code U_BUFFER_OVERFLOW_ERROR) [:retry ret]
+                              :else (throw (ex-info "unorm2_normalize failed" {:code code})))))))
+          r (normalize (+ (* 3 n) 16))]
+      (if (vector? r) (normalize (inc (second r))) r))))
 
 ;; \\p{L} = UCharType 1..5; \\p{N} = 9..11 (Nd, Nl, No)
 (defn letter? [c] (let [t (u-char-type* (int c))] (and (>= t 1) (<= t 5))))
 (defn number? [c] (let [t (u-char-type* (int c))] (and (>= t 9) (<= t 11))))
-(defn space? [c] (not (zero? (u-isspace* (int c)))))
+(defn space? [c] (not (zero? (u-is-uwhitespace* (int c)))))
 
 ;; --- byte-level BPE -----------------------------------------------------------
 
@@ -119,7 +146,12 @@
 (defn pre-tokenize
   "GPT-2 pattern, ordered alternation:
     's|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)|\\s+
-  Hand scanner over codepoints; returns pre-token strings."
+  Hand scanner over codepoints; returns pre-token strings.
+
+  The optional prefix is a literal U+0020 only: a tab or NBSP before a word
+  is its own \\s+ token. A whitespace run followed by a non-space gives up
+  its last char (\\s+(?!\\S) backtracks one), unless the run is a single
+  char, in which case plain \\s+ takes it."
   [s]
   (let [cps (vec s)
         n (count cps)
@@ -127,11 +159,11 @@
                        (when (and (= (nth cps i) \') (< (inc i) n))
                          (let [c1 (nth cps (inc i))
                                c2 (when (< (+ i 2) n) (nth cps (+ i 2)))]
-                           (cond (and (= c1 \s) (letter? c1)) (+ i 2)
+                           (cond (= c1 \s) (+ i 2)
                                  (= c1 \t) (+ i 2)
                                  (and (= c1 \r) (= c2 \e)) (+ i 3)
                                  (and (= c1 \v) (= c2 \e)) (+ i 3)
-                                 (and (= c1 \m)) (+ i 2)
+                                 (= c1 \m) (+ i 2)
                                  (and (= c1 \l) (= c2 \l)) (+ i 3)
                                  (= c1 \d) (+ i 2)
                                  :else nil))))
@@ -147,34 +179,28 @@
                               (letter? (nth cps k))
                               (number? (nth cps k)))
                         k
-                        (recur (inc k)))))]
+                        (recur (inc k)))))
+        next-c (fn [i] (when (< (inc i) n) (nth cps (inc i))))]
     (loop [i 0 rev ()]
       (if (>= i n)
         (vec (reverse rev))
         (let [c (nth cps i)
+              nc (next-c i)
               end (or (contraction? i)
                       (cond
-                        (and (space? c) (< (inc i) n) (letter? (nth cps (inc i))))
-                        (run (inc i) letter?)
-
+                        ;; " ?\\p{L}+" / " ?\\p{N}+" / " ?[^\\s\\p{L}\\p{N}]+"
+                        (and (= c \space) nc (letter? nc)) (run (inc i) letter?)
                         (letter? c) (run i letter?)
-
-                        (and (space? c) (< (inc i) n) (number? (nth cps (inc i))))
-                        (run (inc i) number?)
-
+                        (and (= c \space) nc (number? nc)) (run (inc i) number?)
                         (number? c) (run i number?)
+                        (and (= c \space) nc (not (space? nc))) (other-run (inc i))
 
-                        (and (space? c) (< (inc i) n)
-                             (not (space? (nth cps (inc i)))))
-                        (other-run (inc i))
-
+                        ;; "\\s+(?!\\S)|\\s+"
                         (space? c)
                         (let [k (run i space?)]
-                          (if (< k n) (dec k) k))
+                          (if (and (< k n) (> (- k i) 1)) (dec k) k))
 
                         :else (other-run i)))
-              ;; a space followed by a token starts the token; i stays the
-              ;; token start in every branch above
               tok (subs s i end)]
           (recur end (conj rev tok)))))))
 
