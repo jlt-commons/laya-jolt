@@ -5,6 +5,7 @@
   (LAYA_HOME, default ../laya); writes to target/prepare-test and removes it."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [laya.prepare :as prep]))
 
@@ -41,3 +42,21 @@
     (is (= "1e-05" (prep/py-str 1.0E-5)))
     (is (= "[\"a\" 1.5 2]" (prep/config-value ["a" 1.5 2])))
     (is (= "{\"choice:2\" 1.9063563346862793}" (prep/config-value {"choice:2" 1.9063563346862793})))))
+
+(deftest missing-checkpoint-says-where-to-get-it
+  ;; the usual mistake: ../laya is a checkout of the GitHub laya repo (the
+  ;; Python package), not the weights from the Hub
+  (let [dir "target/prepare-test-empty"]
+    (jolt.host/delete-tree! dir)
+    (io/make-parents (io/file dir "x"))
+    (spit (str dir "/README.md") "not a checkpoint")
+    (let [e (try (prep/convert dir "target/prepare-test-empty-out") nil
+                 (catch Exception e e))]
+      (is (some? e) "convert must refuse a directory without the checkpoint files")
+      (is (= :checkpoint-missing (:type (ex-data e))))
+      (is (= ["model.safetensors" "tokenizer/tokenizer.json" "encoder/config.json" "rl_agent_config.json"]
+             (:missing (ex-data e))))
+      (is (str/includes? (ex-message e) "https://huggingface.co/convaiinnovations/laya"))
+      (is (str/includes? (ex-message e) dir)))
+    (jolt.host/delete-tree! dir)
+    (jolt.host/delete-tree! "target/prepare-test-empty-out")))

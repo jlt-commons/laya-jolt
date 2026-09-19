@@ -172,9 +172,30 @@
 
 ;; --- driver ----------------------------------------------------------------------------
 
+(def hub-url "https://huggingface.co/convaiinnovations/laya")
+
+(def checkpoint-files
+  "What a Laya checkpoint directory must contain (the Hub repo's layout)."
+  ["model.safetensors" "tokenizer/tokenizer.json" "encoder/config.json" "rl_agent_config.json"])
+
+(defn check-checkpoint!
+  "Throw {:type :checkpoint-missing} naming the absent files and where to get
+  them. The usual mistake is pointing at a checkout of the GitHub laya repo,
+  which is the Python package, not the weights."
+  [laya-home]
+  (let [missing (vec (remove #(.exists (io/file laya-home %)) checkpoint-files))]
+    (when (seq missing)
+      (throw (ex-info (str "no Laya checkpoint under " laya-home " (missing "
+                           (str/join ", " missing) ").\n"
+                           "The weights live on the Hub, not in the GitHub laya repo: download "
+                           hub-url " into that directory (README, \"Getting the checkpoint\"), "
+                           "or point LAYA_HOME / --laya at where you put it.")
+                      {:type :checkpoint-missing :laya-home laya-home :missing missing})))))
+
 (defn convert
   "Run the whole conversion of the checkpoint under laya-home into out."
   [laya-home out]
+  (check-checkpoint! laya-home)
   (let [entries (convert-weights (str laya-home "/model.safetensors") out)]
     (write-manifest entries out)
     (write-tokenizer (str laya-home "/tokenizer/tokenizer.json") out)
@@ -197,4 +218,9 @@
   (let [opts (apply hash-map args)
         laya-home (or (get opts "--laya") (System/getenv "LAYA_HOME") "../laya")
         out (or (get opts "--out") "data")]
-    (convert laya-home out)))
+    (try (convert laya-home out)
+         (catch Exception e
+           (if (= :checkpoint-missing (:type (ex-data e)))
+             (do (binding [*out* *err*] (println "jolt prepare:" (ex-message e)))
+                 (System/exit 1))
+             (throw e))))))

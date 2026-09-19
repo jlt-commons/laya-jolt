@@ -13,6 +13,37 @@ of typed questions, and returns calibrated typed answers.
 Everything is f32 end to end. F16 checkpoint weights are widened to f32 once,
 during `prepare`, so the numerics match the torch CPU oracle exactly.
 
+## Getting the checkpoint
+
+The weights are not in this repo and not in the GitHub `laya` repo either
+(that one is the Python package). They live on the Hugging Face Hub:
+**https://huggingface.co/convaiinnovations/laya**. `jolt prepare` reads four
+files from a checkpoint directory laid out like that repo:
+
+```
+../laya/
+  model.safetensors          # ~800 MB, F16
+  tokenizer/tokenizer.json
+  encoder/config.json
+  rl_agent_config.json
+```
+
+Fetch them with nothing but curl:
+
+```
+mkdir -p ../laya/tokenizer ../laya/encoder
+for f in model.safetensors tokenizer/tokenizer.json encoder/config.json rl_agent_config.json; do
+  curl -fL -o ../laya/$f https://huggingface.co/convaiinnovations/laya/resolve/main/$f
+done
+```
+
+or clone the whole model repo with git-lfs (`git lfs install && git clone
+https://huggingface.co/convaiinnovations/laya ../laya`), or with the Hub CLI
+(`hf download convaiinnovations/laya --local-dir ../laya`). Put it anywhere
+and point `LAYA_HOME` at it (or `jolt -M:prepare --laya DIR --out data`).
+`jolt prepare` refuses a directory that lacks any of the four files and says
+so.
+
 ## Build and run
 
 ```
