@@ -2,7 +2,7 @@
 
 Pure-Clojure inference for the Laya decision model, running on
 [jolt](https://github.com/jolt-lang/jolt) (Chez Scheme, no JVM). Same weights,
-same outputs: the stack reproduces the Python engine's `RLAgent.system_one`
+same outputs: the stack reproduces the Python engine's `Agent.system_one`
 answer for the README quickstart byte-for-byte.
 
 The model is a ModernBERT-large encoder (28 layers, RoPE, alternating
@@ -153,33 +153,58 @@ and asks category, spam, phishing, urgency, needs-reply; option
 
 ## HTTP API
 
-`laya.server` mirrors the [TypeSafe Jev API](https://docs.typesafe.ai/api):
+`laya.server` mirrors the [TypeSafe Jev API](https://docs.typesafe.ai/api)
+and adds the Python package's `Router` and presets. Routes are dispatched by
+[ruuter](https://github.com/askonomm/ruuter).
 
 ```
 POST /v1/systemone        Authorization: Bearer <key>   (only if a key is configured)
-{"state": <string|object|array>, "model": "laya-rl-agent", "questions": {"<id>": {...}}}
--> {"model": ..., "answers": {"<id>": {...}}, "usage": {"input_tokens": n, "output_tokens": 0}}
+{"state": <string|object|array>, "questions": {"<id>": {...}}, "model"?: ..., "lang"?: ..., "task"?: ...}
+-> {"model": "laya-rl-agent", "answers": {"<id>": {...}}, "usage": {"input_tokens": n, "output_tokens": 0},
+    "routing": {"model": "english", "repo": "convaiinnovations/laya", "reason": "English Latin text",
+                "detection": {...}, "workflow": null}}
 
-GET  /health              -> {"status": "ok", "model": "laya-rl-agent"}
+POST /v1/route            same body, questions optional -> the routing decision alone (nothing loaded or run)
+POST /v1/workflows/<name> {"input": <anything the workflow's state fn takes>, "options"?: {...}, "model"?/"lang"?/"task"?}
+                          -> the systemone answer + "workflow" + the built "state"
+GET  /v1/models           -> {"default": ..., "max_loaded": n, "models": {"english": {"repo", "data", "available", "loaded"}, ...}}
+GET  /v1/workflows        -> {"workflows": {"email": {"description", "file", "questions": [ids], "options": bool}, ...}}
+GET  /health              -> {"status": "ok", "model": "laya-rl-agent", "loaded": [...], "workflows": [...]}
 ```
 
-Questions and answers have the shapes the Python `RLAgent.system_one`
-uses (choice / score / noul, plus the `rl_agent.act_probability` extension).
-`model` is optional and echoed back; it defaults to `laya-rl-agent`. Errors:
-`401` for a missing or wrong key, `422` with
+Questions and answers have the shapes the Python `Agent.system_one` uses
+(choice / score / noul, plus the `action.act_probability` extension).
+`model` is either absent (or `laya-rl-agent`) to route by content, or a
+checkpoint name / alias (`english`, `multilingual`, `typed-decisions`, `en`,
+`ml`, ...) to pick one; `lang` (`"de"`, `"en-GB"`) and `task`
+(`"typed_decisions"`) are the Router's other hints, in the same precedence
+as upstream: model > task > detected workflow (opt-in) > lang > detected
+script/language > default. Every answer says what was chosen and why under
+`routing`. Errors: `401` for a missing or wrong key, `422` with
 `{"detail": [{"loc": ["body", "questions", "<id>", "criteria"], "msg": ..., "type": ...}]}`
 for anything wrong with the body (malformed JSON, missing state or
-questions, unknown type, criteria that don't fit the type or the head),
-`404`/`405` elsewhere, `413` past `:max-request-bytes` (4 MiB). Inference is
+questions, unknown type or model, criteria that don't fit the type or the
+head), `404` for unknown routes and workflows, `405` for the wrong method,
+`503` when the chosen checkpoint has no prepared data, `413` past
+`:max-request-bytes` (4 MiB). Inference and checkpoint loading are
 serialized on one lock; the adapter's workers overlap only on I/O.
 
 ```
-jolt -M:serve --port 8080 --host 0.0.0.0 --api-key s3cret   # or PORT / LAYA_HOST / LAYA_API_KEY / LAYA_DATA
+jolt -M:serve --port 8080 --host 0.0.0.0 --api-key s3cret   # or PORT / LAYA_HOST / LAYA_API_KEY / LAYA_DATA, or config.edn
 curl -s -H 'Authorization: Bearer s3cret' -H 'Content-Type: application/json' \
   -d '{"state": "Help! My payouts have been failing for 3 days.",
        "questions": {"is_urgent": {"type": "noul", "instructions": "Does this convey urgency?"}}}' \
   http://127.0.0.1:8080/v1/systemone
+curl -s -H 'Authorization: Bearer s3cret' -d '{"input": {"subject": "Refund", "body": "Charged twice.\n\nThanks,\nBob"}}' \
+  http://127.0.0.1:8080/v1/workflows/email
 ```
+
+The server holds one data root (`--data`, the layout `jolt prepare`
+writes: `DIR/` english, `DIR/multilingual`, `DIR/typed-decisions`), loads
+the default checkpoint at startup and the others on first use, keeping
+`--max-loaded` (default 1) resident with least-recently-used eviction: all
+three together are ~4.6 GB of f32. A request routed to a checkpoint that
+was never prepared gets a `503` saying so.
 
 ### As a library
 

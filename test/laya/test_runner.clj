@@ -8,6 +8,9 @@
     laya.sequence-test
     laya.json-test
     workflows.email-test
+    workflows.presets-test
+    laya.lang-test
+    laya.router-test
     laya.config-test
     laya.workflows-test
     laya.run-test

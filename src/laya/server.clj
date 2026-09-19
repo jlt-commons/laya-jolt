@@ -1,38 +1,62 @@
 (ns laya.server
-  "HTTP front for the agent, mirroring the TypeSafe Jev API
-  (https://docs.typesafe.ai/api):
+  "HTTP front for the checkpoints and workflows, mirroring the TypeSafe Jev
+  API (https://docs.typesafe.ai/api) and adding what the Python package's
+  Router and presets offer:
 
-    POST /v1/systemone   {\"state\": ..., \"model\": ..., \"questions\": {...}}
-                         -> {\"model\": ..., \"answers\": {...}, \"usage\": {...}}
-    GET  /health         -> {\"status\": \"ok\", \"model\": \"laya-rl-agent\"}
+    POST /v1/systemone        {\"state\" ..., \"questions\" {...},
+                               \"model\"? \"lang\"? \"task\"?}
+                              -> {\"model\" \"laya-rl-agent\", \"answers\" {...},
+                                  \"usage\" {...}, \"routing\" {...}}
+    POST /v1/route            same body, questions optional -> the routing
+                              decision alone, nothing loaded or run
+    POST /v1/workflows/:name  {\"input\" ..., \"options\"? {...},
+                               \"model\"? \"lang\"? \"task\"?}
+                              -> systemone answer + \"workflow\" + the built \"state\"
+    GET  /v1/models           the checkpoints: repo, data dir, prepared, loaded
+    GET  /v1/workflows        the loaded workflows: description, question ids
+    GET  /health              {\"status\" \"ok\", \"model\" \"laya-rl-agent\",
+                               \"loaded\" [...], \"workflows\" [...]}
 
-  Auth is `Authorization: Bearer <key>` when the server is started with an
-  :api-key (LAYA_API_KEY); without one every request is accepted. Errors:
-  401 for a missing/invalid key, 422 with a FastAPI-style
+  `model` is absent (or the engine's own name, laya-rl-agent) to route by
+  content, or a checkpoint name / alias (english, multilingual,
+  typed-decisions, en, ml, ...) to pick one; `lang` and `task` are the
+  Router's other hints. Anything else is a 422. Routes are dispatched by
+  ruuter.
+
+  Auth is `Authorization: Bearer <key>` on /v1/* when the server is started
+  with an :api-key (LAYA_API_KEY); without one every request is accepted.
+  Errors: 401 for a missing/invalid key, 422 with a FastAPI-style
   {\"detail\": [{\"loc\": [...], \"msg\": ..., \"type\": ...}]} for anything
-  wrong with the body, 404/405 for other routes and methods, 413 from the
-  adapter when the body exceeds :max-request-bytes.
+  wrong with the body, 404 for unknown routes and workflows, 405 for the
+  wrong method, 503 when the chosen checkpoint has no prepared data, 413
+  from the adapter when the body exceeds :max-request-bytes.
 
-  As a library: (handler agent opts) is a plain ring handler to mount in
-  another app; (start agent opts) / (stop server) run it on
-  ring-chez-adapter. As a binary: `jolt build -m laya.server -o laya-server`
-  (the `binary` task), then `./laya-server --data data --port 8080`.
+  As a library: (handler router-or-agent opts) is a plain ring handler to
+  mount in another app; (start router-or-agent opts) / (stop server) run it
+  on ring-chez-adapter. As a binary: `jolt build -m laya.server -o
+  laya-server` (the `binary` task), then `./laya-server --data data`.
 
   Requests are parsed with laya.json, which keeps object key order: the
   order of options, questions and state fields is model input. Inference
-  runs one request at a time behind a lock; the adapter's workers only
-  overlap on I/O."
+  (and checkpoint loading) runs one request at a time behind a lock; the
+  adapter's workers only overlap on I/O."
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
             [laya.agent :as ag]
-            [laya.json :as json]
-            [laya.sequence :as seq]
             [laya.config :as cfg]
+            [laya.json :as json]
+            [laya.router :as router]
+            [laya.sequence :as seq]
             [laya.tokenizer :as tk]
-            [ring-chez.adapter :as adapter])
+            [laya.workflows :as wf]
+            [ring-chez.adapter :as adapter]
+            [ruuter.core :as ruuter])
   (:gen-class))
 
 (def default-model "laya-rl-agent")
+
+;; the engine's own names: "route for me", not a checkpoint choice
+(def ^:private engine-names #{"laya-rl-agent" "rl-agent"})
 
 ;; --- responses ------------------------------------------------------------------
 
@@ -53,102 +77,230 @@
 (def ^:private not-found (json-response 404 {"detail" "Not Found"}))
 (def ^:private method-not-allowed (json-response 405 {"detail" "Method Not Allowed"}))
 
+(defn- question-loc [{:keys [qid field]}]
+  (cond-> ["body" "questions" (str qid)] field (conj field)))
+
+(defn- error-response
+  "The HTTP shape of the exceptions the library throws; rethrows the rest."
+  [e]
+  (let [data (ex-data e)]
+    (case (:type data)
+      :invalid-json (unprocessable [(detail ["body"] (ex-message e) "json_invalid")])
+      :invalid-question (unprocessable [(detail (question-loc data) (ex-message e) "value_error")])
+      :unknown-model (unprocessable [(detail ["body" "model"] (ex-message e) "value_error")])
+      :invalid-request (unprocessable [(detail ["body" (or (:field data) "options")] (ex-message e) "value_error")])
+      :model-unavailable (json-response 503 {"detail" (ex-message e)})
+      (throw e))))
+
 ;; --- request ---------------------------------------------------------------------
 
 (defn- body-string [body]
   (cond (nil? body) "" (string? body) body :else (slurp body)))
 
 (defn- parse-body
-  "The JSON document in the request body; ex-info :invalid-json otherwise."
-  [req]
-  (let [text (body-string (:body req))]
-    (when (str/blank? text)
-      (throw (ex-info "json: request body is empty" {:type :invalid-json})))
-    (json/read-str text)))
+  "The JSON document in the request body; ex-info :invalid-json otherwise.
+  With allow-empty?, an empty body reads as {}."
+  ([req] (parse-body req false))
+  ([req allow-empty?]
+   (let [text (body-string (:body req))]
+     (if (str/blank? text)
+       (if allow-empty? {} (throw (ex-info "json: request body is empty" {:type :invalid-json})))
+       (json/read-str text)))))
 
-(defn- question-loc [{:keys [qid field]}]
-  (cond-> ["body" "questions" (str qid)] field (conj field)))
+(defn- check-routing-fields
+  "model / lang / task must be strings, and model a known checkpoint (or
+  the engine's own name)."
+  [body]
+  (concat
+   (for [k ["model" "lang" "task"]
+         :when (and (contains? body k) (not (string? (get body k))))]
+     (detail ["body" k] (str k " must be a string") "type_error"))
+   (let [m (get body "model")]
+     (when (and (string? m) (not (engine-names m)))
+       (try (router/normalise-name m) nil
+            (catch Exception e
+              [(detail ["body" "model"] (ex-message e) "value_error")]))))))
+
+(defn- check-state [body]
+  (let [state (get body "state")]
+    (when-not (or (string? state) (map? state) (sequential? state))
+      [(detail ["body" "state"] "state is required: a string, object or array" "value_error")])))
+
+(defn- check-questions [qs]
+  (cond
+    (not (map? qs)) [(detail ["body" "questions"] "questions is required: an object of question id -> question" "value_error")]
+    (empty? qs) [(detail ["body" "questions"] "questions must not be empty" "value_error")]
+    :else (keep (fn [[qid qdef]]
+                  (try (ag/validate-question qid qdef) nil
+                       (catch Exception e
+                         (detail (question-loc (ex-data e)) (ex-message e) "value_error"))))
+                qs)))
 
 (defn- check-request
-  "Everything wrong with a parsed body, as detail entries. Each question is
-  checked with agent/validate-question, so the reasons match the library."
+  "Everything wrong with a parsed /v1/systemone body, as detail entries.
+  Each question is checked with agent/validate-question, so the reasons
+  match the library."
   [body]
   (if-not (map? body)
     [(detail ["body"] "request body must be a JSON object" "type_error")]
-    (let [state (get body "state")
-          qs (get body "questions")
-          model (get body "model")]
-      (vec
-       (concat
-        (when-not (or (string? state) (map? state) (sequential? state))
-          [(detail ["body" "state"] "state is required: a string, object or array" "value_error")])
-        (when (and (contains? body "model") (not (string? model)))
-          [(detail ["body" "model"] "model must be a string" "type_error")])
-        (cond
-          (not (map? qs)) [(detail ["body" "questions"] "questions is required: an object of question id -> question" "value_error")]
-          (empty? qs) [(detail ["body" "questions"] "questions must not be empty" "value_error")]
-          :else (keep (fn [[qid qdef]]
-                        (try (ag/validate-question qid qdef) nil
-                             (catch Exception e
-                               (detail (question-loc (ex-data e)) (ex-message e) "value_error"))))
-                      qs)))))))
+    (vec (concat (check-state body)
+                 (check-routing-fields body)
+                 (check-questions (get body "questions"))))))
+
+(defn- routing-opts
+  "The Router hints in a body: :model (nil for the engine's own name), :lang, :task."
+  [body]
+  (let [m (get body "model")]
+    {:model (when-not (engine-names m) m)
+     :lang (get body "lang")
+     :task (get body "task")}))
+
+;; --- endpoints ---------------------------------------------------------------------
 
 (defn systemone
-  "Answer one parsed /v1/systemone body. Inference is serialized on lock."
-  [agent lock body]
+  "Answer one parsed /v1/systemone body: route, load if needed, infer.
+  Inference is serialized on lock."
+  [rt lock body]
   (let [details (check-request body)]
     (if (seq details)
       (unprocessable details)
-      (let [result (locking lock
-                     (ag/system-one agent (get body "state") (get body "questions")))]
-        (json-response 200 (assoc result "model" (get body "model" default-model)))))))
+      (let [{:keys [model lang task]} (routing-opts body)
+            result (locking lock
+                     (router/predict rt (get body "state") (get body "questions")
+                                     :model model :lang lang :task task))]
+        (json-response 200 result)))))
+
+(defn route-only
+  "POST /v1/route: the decision for a body, without loading or running."
+  [rt body]
+  (let [details (if-not (map? body)
+                  [(detail ["body"] "request body must be a JSON object" "type_error")]
+                  (concat (check-state body)
+                          (check-routing-fields body)
+                          (when (and (contains? body "questions") (not (map? (get body "questions"))))
+                            [(detail ["body" "questions"] "questions must be an object" "type_error")])))]
+    (if (seq details)
+      (unprocessable details)
+      (let [{:keys [model lang task]} (routing-opts body)]
+        (json-response 200 (router/route rt (get body "state") (get body "questions" {})
+                                         :model model :lang lang :task task))))))
+
+(defn run-workflow
+  "POST /v1/workflows/:name: the workflow's state fn on \"input\", its
+  questions with \"options\", routed and answered; the answer carries the
+  workflow name and the state the model actually read."
+  [rt lock workflows name body]
+  (let [w (get workflows name)]
+    (cond
+      (nil? w)
+      (json-response 404 {"detail" (str "no workflow named " (pr-str name) "; known: "
+                                        (str/join ", " (sort (keys workflows))))})
+
+      (not (map? body))
+      (unprocessable [(detail ["body"] "request body must be a JSON object" "type_error")])
+
+      (and (contains? body "options") (not (map? (get body "options"))))
+      (unprocessable [(detail ["body" "options"] "options must be an object" "type_error")])
+
+      :else
+      (let [details (check-routing-fields body)]
+        (if (seq details)
+          (unprocessable details)
+          (let [state (wf/state w (get body "input"))
+                questions (wf/questions w (get body "options" {}))
+                details (concat (check-state {"state" state}) (check-questions questions))]
+            (if (seq details)
+              (unprocessable details)
+              (let [{:keys [model lang task]} (routing-opts body)
+                    result (locking lock
+                             (router/predict rt state questions :model model :lang lang :task task))]
+                (json-response 200 (assoc result "workflow" name "state" state))))))))))
+
+(defn- health [rt workflows]
+  (json-response 200 (seq/ordered-map [["status" "ok"] ["model" default-model]
+                                       ["loaded" (router/loaded rt)]
+                                       ["workflows" (vec (sort (keys workflows)))]])))
+
+(defn- models [rt]
+  (let [loaded (set (router/loaded rt))]
+    (json-response 200 (seq/ordered-map
+                        [["default" (:default rt)]
+                         ["max_loaded" (:max-loaded rt)]
+                         ["models" (seq/ordered-map
+                                    (for [[name dir] (:models rt)]
+                                      [name (seq/ordered-map [["repo" (get router/repos name)]
+                                                              ["data" dir]
+                                                              ["available" (router/available? rt name)]
+                                                              ["loaded" (contains? loaded name)]])]))]]))))
+
+(defn- list-workflows [workflows]
+  (json-response 200 {"workflows"
+                      (seq/ordered-map
+                       (for [[name w] (sort-by key workflows)]
+                         [name (seq/ordered-map [["description" (:doc w)]
+                                                 ["file" (:file w)]
+                                                 ["questions" (vec (map #(if (keyword? %) (clojure.core/name %) (str %))
+                                                                        (keys (wf/questions w))))]
+                                                 ["options" (:options? w)]])]))}))
+
+;; --- the handler --------------------------------------------------------------------
 
 (defn- authorized? [req api-key]
   (or (nil? api-key)
       (= (get-in req [:headers "authorization"]) (str "Bearer " api-key))))
 
+(def ^:private http-methods [:get :post :put :delete :patch :head :options])
+
+(defn- routes
+  "The ruuter route table. Every real route is followed by 405 entries for
+  the other methods on its path; anything else is the 404."
+  [rt lock workflows api-key]
+  (let [guard (fn [f] (fn [req] (if (authorized? req api-key) (f req) unauthorized)))
+        json-in (fn [f allow-empty?]
+                  (fn [req] (try (f (parse-body req allow-empty?))
+                                 (catch Exception e (error-response e)))))
+        real [{:path "/health" :method :get :response (fn [_] (health rt workflows))}
+              {:path "/v1/systemone" :method :post
+               :response (guard (json-in #(systemone rt lock %) false))}
+              {:path "/v1/route" :method :post
+               :response (guard (json-in #(route-only rt %) false))}
+              {:path "/v1/models" :method :get :response (guard (fn [_] (models rt)))}
+              {:path "/v1/workflows" :method :get :response (guard (fn [_] (list-workflows workflows)))}
+              {:path "/v1/workflows/:name" :method :post
+               :response (guard (fn [req]
+                                  (try (run-workflow rt lock workflows (get-in req [:params :name])
+                                                     (parse-body req true))
+                                       (catch Exception e (error-response e)))))}]
+        disallowed (for [{:keys [path method]} real
+                         m http-methods :when (not= m method)]
+                     {:path path :method m :response method-not-allowed})]
+    (vec (concat real disallowed [{:path :not-found :response not-found}]))))
+
 (defn handler
-  "A ring handler for the API. opts: :api-key (nil = no auth)."
-  [agent {:keys [api-key]}]
-  (let [lock (Object.)]
-    (fn [req]
-      (let [method (:request-method req)]
-        (case (:uri req)
-          "/health"
-          (if (= :get method)
-            (json-response 200 (seq/ordered-map [["status" "ok"] ["model" default-model]]))
-            method-not-allowed)
-
-          "/v1/systemone"
-          (cond
-            (not= :post method) method-not-allowed
-            (not (authorized? req api-key)) unauthorized
-            :else
-            (try
-              (systemone agent lock (parse-body req))
-              (catch Exception e
-                (case (:type (ex-data e))
-                  :invalid-json (unprocessable [(detail ["body"] (ex-message e) "json_invalid")])
-                  :invalid-question (unprocessable [(detail (question-loc (ex-data e)) (ex-message e) "value_error")])
-                  (throw e)))))
-
-          not-found)))))
+  "A ring handler for the API. `rt` is a laya.router router, or one loaded
+  agent (served as the english checkpoint). opts: :api-key (nil = no auth),
+  :workflows {name workflow} from laya.workflows/load-workflows."
+  [rt {:keys [api-key workflows]}]
+  (let [rt (if (router/router? rt) rt (router/preloaded rt))
+        table (routes rt (Object.) (or workflows {}) api-key)]
+    (fn [req] (ruuter/route table req))))
 
 ;; --- server ----------------------------------------------------------------------
 
 (defn start
   "Run the API on ring-chez-adapter; answers the server handle.
   opts: :port (8080), :host (\"127.0.0.1\"; \"0.0.0.0\" for all interfaces),
-  :api-key, :max-request-bytes (4 MiB), plus anything the adapter takes."
-  [agent {:keys [port host max-request-bytes]
-          :or {port 8080 host "127.0.0.1" max-request-bytes (* 4 1024 1024)}
-          :as opts}]
+  :api-key, :workflows, :max-request-bytes (4 MiB), plus anything the
+  adapter takes."
+  [rt {:keys [port host max-request-bytes]
+       :or {port 8080 host "127.0.0.1" max-request-bytes (* 4 1024 1024)}
+       :as opts}]
   (adapter/run-server
-   (handler agent opts)
+   (handler rt opts)
    (merge {:on-failure (fn [_ ex]
                          (binding [*out* *err*] (println "laya.server:" (ex-message ex)))
                          (json-response 500 {"detail" "Internal Server Error"}))}
-          (dissoc opts :api-key)
+          (dissoc opts :api-key :workflows)
           {:port port :host host :max-request-bytes max-request-bytes})))
 
 (defn stop [server]
@@ -156,58 +308,79 @@
 
 (defn self-test
   "Run the README quickstart through the handler and compare with the
-  json.dumps(RLAgent.system_one(...)) pinned in <golden-dir>/readme.edn,
-  plus the tokenizer paths a release build has miscompiled before.
-  Answers [[name ok? detail] ...]. The test suite runs interpreted; this is
-  what proves the AOT binary computes the same thing."
+  json.dumps(Agent.system_one(...)) pinned in <golden-dir>/readme.edn, plus
+  the tokenizer paths a release build has miscompiled before. Answers
+  [[name ok? detail] ...]. The test suite runs interpreted; this is what
+  proves the AOT binary computes the same thing."
   [agent golden-dir]
   (let [h (handler agent {})
-        cases (edn/read-string {:readers {'laya/omap seq/ordered-map}}
-                               (slurp (str golden-dir "/cases.edn")))
-        want (:system-one (edn/read-string (slurp (str golden-dir "/readme.edn"))))
+        golden (fn [name] (edn/read-string {:readers {'laya/omap seq/ordered-map}}
+                                           (slurp (str golden-dir "/" name ".edn"))))
+        cases (golden "cases")
+        want (:system-one (golden "readme"))
         body (seq/json-str (seq/ordered-map [["state" (:readme-state cases)]
                                              ["model" default-model]
                                              ["questions" (:readme-questions cases)]]))
         resp (h {:request-method :post :uri "/v1/systemone" :headers {} :body body})
+        ;; the answer is the python JSON with a routing key appended
         got (str/trim (:body resp))
+        prefix (subs want 0 (dec (count want)))
+        answer-ok (and (str/starts-with? got prefix)
+                       (str/starts-with? (subs got (count prefix)) ", \"routing\": {"))
         tok (:tok agent)
         tok-cases (:tok-cases cases)
-        tok-golden (:cases (edn/read-string (slurp (str golden-dir "/tok.edn"))))
+        tok-golden (:cases (golden "tok"))
         tok-ok (every? (fn [[i c]] (= (get tok-golden (str i)) (tk/encode tok c)))
                        (map-indexed vector tok-cases))
-        nfc-ok (= (apply str (repeat 300 "\u0915\u093c"))
-                  (tk/nfc (apply str (repeat 300 "\u0958"))))]
-    [["README quickstart answer is byte-identical to the Python engine" (= want got)
-      (when (not= want got) (str "got " got))]
+        nfc-ok (= (apply str (repeat 300 "क़"))
+                  (tk/nfc (apply str (repeat 300 "क़"))))]
+    [["README quickstart answer is byte-identical to the Python engine" answer-ok
+      (when-not answer-ok (str "got " got))]
      ["tokenizer reproduces golden/tok.edn" tok-ok nil]
      ["NFC expansion path" nfc-ok nil]]))
 
 (defn -main
   "jolt -M:serve [--data DIR] [--port N] [--host ADDR] [--api-key KEY]
+                 [--max-loaded N] [--default-model NAME] [--workflows DIR[:DIR]]
    Each falls back to an environment variable (LAYA_DATA, PORT, LAYA_HOST,
-   LAYA_API_KEY), then to ~/.config/laya/config.edn (:data :port :host
-   :api-key), then to a default (laya.config).
+   LAYA_API_KEY, LAYA_MAX_LOADED, LAYA_DEFAULT_MODEL, LAYA_WORKFLOWS), then to
+   ~/.config/laya/config.edn (:data :port :host :api-key :max-loaded
+   :default-model :auto-task-detection :workflow-dirs), then to a default.
+   DIR is the data root jolt prepare writes: DIR/ (english),
+   DIR/multilingual, DIR/typed-decisions; the default checkpoint is loaded
+   at startup, the others on first use.
    --self-test [--golden DIR]: load, verify against golden/, exit 0 or 1."
   [& args]
   (let [opts (cfg/parse-args args)
         ctx (cfg/context opts)
         arg (fn [flag env key default] (cfg/setting ctx flag env key default))
         data-dir (arg "--data" "LAYA_DATA" :data "data")
+        rt (router/make-router {:data data-dir
+                                :max-loaded (Long/parseLong (str (arg "--max-loaded" "LAYA_MAX_LOADED" :max-loaded "1")))
+                                :default (arg "--default-model" "LAYA_DEFAULT_MODEL" :default-model "english")
+                                :auto-task-detection (or (true? (get opts "--auto-task-detection"))
+                                                         (true? (:auto-task-detection (:config ctx))))})
+        log (fn [& xs] (binding [*out* *err*] (apply println "laya:" xs)))
         t0 (System/nanoTime)
-        _ (binding [*out* *err*] (println "laya: loading" data-dir "..."))
-        agent (ag/load-agent data-dir)
-        _ (binding [*out* *err*]
-            (println (format "laya: %d tensors loaded in %.1fs" (count (:w agent)) (/ (- (System/nanoTime) t0) 1e9))))]
+        _ (log "loading" (:default rt) "from" (get (:models rt) (:default rt)) "...")
+        agent (try (router/load-model rt (:default rt))
+                   (catch Exception e
+                     (if (= :model-unavailable (:type (ex-data e)))
+                       (do (log (ex-message e)) (System/exit 1))
+                       (throw e))))
+        _ (log (format "%d tensors loaded in %.1fs" (count (:w agent)) (/ (- (System/nanoTime) t0) 1e9)))]
     (if (get opts "--self-test")
       (let [results (self-test agent (arg "--golden" "LAYA_GOLDEN" :golden "golden"))]
         (doseq [[name ok? detail] results]
           (println (if ok? "ok  " "FAIL") name (or detail "")))
         (System/exit (if (every? second results) 0 1)))
-      (let [port (Long/parseLong (str (arg "--port" "PORT" :port "8080")))
+      (let [workflows (wf/load-workflows (cfg/workflow-dirs ctx))
+            port (Long/parseLong (str (arg "--port" "PORT" :port "8080")))
             host (arg "--host" "LAYA_HOST" :host "127.0.0.1")
             api-key (arg "--api-key" "LAYA_API_KEY" :api-key nil)
-            server (start agent {:port port :host host :api-key api-key})]
-        (binding [*out* *err*]
-          (println (format "laya: listening on http://%s:%d (auth %s)"
-                           host (:port server) (if api-key "on" "off"))))
+            server (start rt {:port port :host host :api-key api-key :workflows workflows})]
+        (log "workflows:" (if (seq workflows) (str/join ", " (sort (keys workflows))) "none"))
+        (log "checkpoints:" (str/join ", " (for [n router/names]
+                                             (str n (if (router/available? rt n) "" " (not prepared)")))))
+        (log (format "listening on http://%s:%d (auth %s)" host (:port server) (if api-key "on" "off")))
         @(promise)))))

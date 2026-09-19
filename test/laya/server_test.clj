@@ -6,11 +6,14 @@
             [clojure.test :refer [deftest is testing]]
             [laya.agent :as ag]
             [laya.json :as json]
+            [laya.router :as router]
             [laya.sequence :as seq]
             [laya.server :as srv]
-            [laya.test-util :as tu]))
+            [laya.test-util :as tu]
+            [laya.workflows :as wf]))
 
 (def agent (delay (ag/load-agent tu/data-dir)))
+(def workflows (delay (wf/load-workflows ["workflows"])))
 
 (defn- req [method uri & {:keys [body headers]}]
   {:request-method method :uri uri :headers (or headers {}) :body body})
@@ -32,27 +35,118 @@
         resp (h (req :post "/v1/systemone" :body (readme-request)))]
     (is (= 200 (:status resp)))
     (is (= "application/json" (get-in resp [:headers "Content-Type"])))
-    (testing "the body is json.dumps(RLAgent.system_one(...)), byte for byte"
-      (is (= (:system-one (tu/read-golden "readme")) (str/trim (:body resp)))))))
+    (testing "the body is json.dumps(Agent.system_one(...)) plus the routing decision"
+      (let [body (str/trim (:body resp))
+            want (:system-one (tu/read-golden "readme"))]
+        (is (str/starts-with? body (subs want 0 (dec (count want)))) "byte-identical up to the routing key")
+        (is (= "english" (get-in (json/read-str body) ["routing" "model"])))))))
 
-(deftest model-field
+(deftest model-field-selects-the-checkpoint
   (let [h (srv/handler @agent {})
         base (json/read-str (readme-request))
         one-q (seq/ordered-map [["state" "Refund me."]
                                 ["questions" (seq/ordered-map [["q" (get-in base ["questions" "churn_risk"])]])]])]
-    (testing "echoed when given"
-      (let [[st body] (call h (req :post "/v1/systemone" :body (seq/json-str (assoc one-q "model" "jev-latest"))))]
+    (testing "absent, or the engine's own name: routed by content, with the decision attached"
+      (doseq [body [one-q (assoc one-q "model" "laya-rl-agent") (assoc one-q "model" "rl-agent")]]
+        (let [[st b] (call h (req :post "/v1/systemone" :body (seq/json-str body)))]
+          (is (= 200 st))
+          (is (= "laya-rl-agent" (get b "model")))
+          (is (= ["model" "answers" "usage" "routing"] (keys b)))
+          (is (= "english" (get-in b ["routing" "model"])))
+          (is (= "English Latin text" (get-in b ["routing" "reason"]))))))
+    (testing "a checkpoint name or alias is an explicit choice"
+      (let [[st b] (call h (req :post "/v1/systemone" :body (seq/json-str (assoc one-q "model" "en"))))]
         (is (= 200 st))
-        (is (= "jev-latest" (get body "model")))
-        (is (= ["model" "answers" "usage"] (keys body)))))
-    (testing "defaults to the checkpoint's name"
-      (let [[st body] (call h (req :post "/v1/systemone" :body (seq/json-str one-q)))]
+        (is (= "english" (get-in b ["routing" "model"])))
+        (is (= "explicit model='en'" (get-in b ["routing" "reason"])))))
+    (testing "lang and task route too"
+      (let [[st b] (call h (req :post "/v1/systemone" :body (seq/json-str (assoc one-q "lang" "en-GB"))))]
         (is (= 200 st))
-        (is (= "laya-rl-agent" (get body "model")))))
-    (testing "must be a string"
-      (let [[st body] (call h (req :post "/v1/systemone" :body (seq/json-str (assoc one-q "model" 3))))]
+        (is (= "explicit lang='en-GB'" (get-in b ["routing" "reason"])))))
+    (testing "an unknown model is a 422 naming the choices"
+      (let [[st b] (call h (req :post "/v1/systemone" :body (seq/json-str (assoc one-q "model" "jev-latest"))))]
         (is (= 422 st))
-        (is (= ["body" "model"] (get-in body ["detail" 0 "loc"])))))))
+        (is (= ["body" "model"] (get-in b ["detail" 0 "loc"])))
+        (is (str/includes? (get-in b ["detail" 0 "msg"]) "multilingual"))))
+    (testing "a checkpoint that is not prepared is a 503, not a crash"
+      (let [[st b] (call h (req :post "/v1/systemone" :body (seq/json-str (assoc one-q "model" "multilingual"))))]
+        (is (= 503 st))
+        (is (str/includes? (get b "detail") "multilingual"))))
+    (testing "must be strings"
+      (doseq [k ["model" "lang" "task"]]
+        (let [[st b] (call h (req :post "/v1/systemone" :body (seq/json-str (assoc one-q k 3))))]
+          (is (= 422 st) k)
+          (is (= ["body" k] (get-in b ["detail" 0 "loc"])) k))))))
+
+(deftest route-without-inference
+  (let [boom (fn [name _] (throw (ex-info (str "must not load " name) {})))
+        h (srv/handler (router/make-router {:loader boom}) {})]
+    (testing "POST /v1/route answers the decision and loads nothing"
+      (let [[st b] (call h (req :post "/v1/route" :body (seq/json-str {"state" {"body" "\u092e\u0941\u091d\u0938\u0947 \u0926\u094b"}})))]
+        (is (= 200 st))
+        (is (= "multilingual" (get b "model")))
+        (is (= "convaiinnovations/laya/multilingual" (get b "repo")))
+        (is (= "devanagari" (get-in b ["detection" "script"]))))
+      (let [[st b] (call h (req :post "/v1/route" :body (seq/json-str {"state" "hi" "task" "typed_decisions"})))]
+        (is (= 200 st))
+        (is (= "typed-decisions" (get b "model")))))
+    (testing "questions are optional here, state is not"
+      (is (= 422 (first (call h (req :post "/v1/route" :body "{}"))))))))
+
+(deftest models-and-workflows-listing
+  (let [h (srv/handler @agent {:workflows @workflows})]
+    (testing "GET /v1/models: the three checkpoints, which are prepared and loaded"
+      (let [[st b] (call h (req :get "/v1/models"))]
+        (is (= 200 st))
+        (is (= ["english" "multilingual" "typed-decisions"] (keys (get b "models"))))
+        (is (= "convaiinnovations/laya" (get-in b ["models" "english" "repo"])))
+        (is (true? (get-in b ["models" "english" "loaded"])))
+        (is (true? (get-in b ["models" "english" "available"])))
+        (is (= "english" (get b "default")))))
+    (testing "GET /v1/workflows: name, description, question ids, whether options are taken"
+      (let [[st b] (call h (req :get "/v1/workflows"))]
+        (is (= 200 st))
+        (is (= ["demo" "email" "guard" "llm-router" "moderation" "triage"] (keys (get b "workflows"))))
+        (is (= ["category" "is_spam" "is_phishing" "urgency" "needs_reply"] (get-in b ["workflows" "email" "questions"])))
+        (is (true? (get-in b ["workflows" "email" "options"])))
+        (is (false? (get-in b ["workflows" "demo" "options"])))
+        (is (str/starts-with? (get-in b ["workflows" "email" "description"]) "Email triage"))))))
+
+(deftest workflow-endpoint
+  (let [h (srv/handler @agent {:workflows @workflows})
+        g (tu/read-golden "email_answers")
+        {:keys [body-index state result]} (first (:cases g))
+        raw (first (nth (:clean (tu/read-golden "email")) body-index))]
+    (testing "POST /v1/workflows/email builds the state, asks its questions, reports both"
+      (let [[st b] (call h (req :post "/v1/workflows/email"
+                                :body (seq/json-str (seq/ordered-map [["input" (seq/ordered-map [["subject" "Support request"] ["body" raw] ["from" "someone@example.com"]])]]))))
+            want (json/read-str result)]
+        (is (= 200 st))
+        (is (= ["model" "answers" "usage" "routing" "workflow" "state"] (keys b)))
+        (is (= "email" (get b "workflow")))
+        (is (= (into {} state) (into {} (get b "state"))) "the cleaned email the model read")
+        (is (= (dissoc (get want "answers") "wide") (get b "answers")))))
+    (testing "options reach the workflow; a bare string input is allowed"
+      (let [[st b] (call h (req :post "/v1/workflows/email"
+                                :body (seq/json-str {"input" "Refund me" "options" {"categories" {"refund" "money back" "other" "else"}}})))]
+        (is (= 200 st))
+        (is (= ["refund" "other"] (keys (get-in b ["answers" "category" "probabilities"]))))))
+    (testing "demo needs no input at all"
+      (let [[st b] (call h (req :post "/v1/workflows/demo" :body "{}"))]
+        (is (= 200 st))
+        (is (= (json/read-str (:system-one (tu/read-golden "readme")))
+               (dissoc b "routing" "workflow" "state")))))
+    (testing "model / lang / task route the workflow request too"
+      (let [[st b] (call h (req :post "/v1/workflows/demo" :body (seq/json-str {"model" "english"})))]
+        (is (= 200 st))
+        (is (= "explicit model='english'" (get-in b ["routing" "reason"])))))
+    (testing "unknown workflow is a 404 that lists the known ones"
+      (let [[st b] (call h (req :post "/v1/workflows/nope" :body "{}"))]
+        (is (= 404 st))
+        (is (str/includes? (get b "detail") "email"))))
+    (testing "options to a workflow that takes none, or a non-object body, are 422"
+      (is (= 422 (first (call h (req :post "/v1/workflows/demo" :body (seq/json-str {"options" {"x" 1}}))))))
+      (is (= 422 (first (call h (req :post "/v1/workflows/demo" :body "[1]"))))))))
 
 (deftest bearer-auth
   (let [h (srv/handler @agent {:api-key "s3cret"})
@@ -111,13 +205,16 @@
         (is (= ["body" "questions" "wide" "criteria"] (loc b)))))))
 
 (deftest routing
-  (let [h (srv/handler @agent {})]
+  (let [h (srv/handler @agent {:workflows @workflows})]
     (is (= 404 (first (call h (req :get "/nope")))))
     (is (= 405 (first (call h (req :get "/v1/systemone")))))
     (is (= 405 (first (call h (req :post "/health")))))
+    (is (= 405 (first (call h (req :get "/v1/workflows/email")))))
+    (is (= 405 (first (call h (req :post "/v1/models")))))
     (let [[st b] (call h (req :get "/health"))]
       (is (= 200 st))
-      (is (= {"status" "ok" "model" "laya-rl-agent"} b)))))
+      (is (= {"status" "ok" "model" "laya-rl-agent" "loaded" ["english"]
+              "workflows" ["demo" "email" "guard" "llm-router" "moderation" "triage"]} b)))))
 
 (deftest wire-order-is-preserved
   (testing "14 options and 9 questions keep their JSON order end to end"
@@ -144,8 +241,10 @@
             answer (curl (str "-X POST -H 'Content-Type: application/json' -H 'Authorization: Bearer k' -d '"
                              body "' " base "/v1/systemone"))
             denied (curl (str "-o /dev/null -w '%{http_code}' -X POST -d '{}' " base "/v1/systemone"))]
-        (is (= {"status" "ok" "model" "laya-rl-agent"} (json/read-str (str/trim health))))
-        (is (= (:system-one (tu/read-golden "readme")) (str/trim answer)))
+        (is (= {"status" "ok" "model" "laya-rl-agent" "loaded" ["english"] "workflows" []}
+               (json/read-str (str/trim health))))
+        (is (= (json/read-str (:system-one (tu/read-golden "readme")))
+               (dissoc (json/read-str (str/trim answer)) "routing")))
         (is (= "401" (str/trim denied))))
       (finally
         (srv/stop server)))))
