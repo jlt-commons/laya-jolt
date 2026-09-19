@@ -193,6 +193,46 @@
                            "or point LAYA_HOME / --laya at where you put it.")
                       {:type :checkpoint-missing :laya-home laya-home :missing missing})))))
 
+(def checkpoints
+  "Checkpoint name -> its subfolder in the Hub bundle (english is the root).
+  Prepared data mirrors the layout: <out>/, <out>/multilingual, <out>/typed-decisions."
+  (seq/ordered-map [["english" ""] ["multilingual" "multilingual"] ["typed-decisions" "typed-decisions"]]))
+
+;; the multilingual checkpoint's tokenizer (mmBERT / Gemma sentencepiece BPE)
+;; is not ported yet; its weights would convert but nothing could read them
+(def supported #{"english" "typed-decisions"})
+
+(defn checkpoint-dir [laya-home name]
+  (let [sub (get checkpoints name)]
+    (if (= sub "") laya-home (str laya-home "/" sub))))
+
+(defn out-dir [out name]
+  (let [sub (get checkpoints name)]
+    (if (= sub "") out (str out "/" sub))))
+
+(defn- present? [dir]
+  (every? #(.exists (io/file dir %)) checkpoint-files))
+
+(defn plan
+  "What to convert: [{:name :src :out} ...]. With no names, the root
+  (english, required) plus every subfolder that is there; with names, exactly
+  those, each of which must be there."
+  [laya-home out names]
+  (doseq [n names]
+    (when-not (contains? checkpoints n)
+      (throw (ex-info (str "unknown checkpoint " (pr-str n) "; choose one of " (str/join ", " (keys checkpoints)))
+                      {:type :unknown-model :model n :known (vec (keys checkpoints))}))))
+  (if (seq names)
+    (vec (for [n names]
+           (let [src (checkpoint-dir laya-home n)]
+             (check-checkpoint! src)
+             {:name n :src src :out (out-dir out n)})))
+    (do (check-checkpoint! laya-home)
+        (vec (for [[n _] checkpoints
+                   :let [src (checkpoint-dir laya-home n)]
+                   :when (present? src)]
+               {:name n :src src :out (out-dir out n)})))))
+
 (defn convert
   "Run the whole conversion of the checkpoint under laya-home into out."
   [laya-home out]
@@ -215,16 +255,33 @@
       (when (neg? crc) (throw (ex-info "cannot read file" {:path path})))
       [(ffi/read sz :int64 0) crc])))
 
+(defn convert-bundle
+  "Convert the checkpoints `plan` lists, skipping the ones this port cannot
+  read yet. Answers {name entries}."
+  [laya-home out names]
+  (into {}
+        (for [{:keys [name src out]} (plan laya-home out names)]
+          (if (supported name)
+            (do (println (str "== " name ": " src " -> " out))
+                [name (convert src out)])
+            (do (println (str "== " name ": skipped, its tokenizer is not ported yet"))
+                nil)))))
+
 (defn -main
-  "jolt -M:prepare [--laya DIR] [--out DIR]. Falls back to LAYA_HOME / LAYA_DATA,
-  then config.edn :laya-home / :data, then ../laya and data."
+  "jolt -M:prepare [--laya DIR] [--out DIR] [--model NAME]. Falls back to
+  LAYA_HOME / LAYA_DATA, then config.edn :laya-home / :data, then ../laya and
+  data. Without --model every checkpoint present under DIR is converted
+  (english at the root, multilingual/ and typed-decisions/ when downloaded)."
   [& args]
-  (let [ctx (cfg/context (cfg/parse-args args))
+  (let [opts (cfg/parse-args args)
+        ctx (cfg/context opts)
         laya-home (cfg/setting ctx "--laya" "LAYA_HOME" :laya-home "../laya")
-        out (cfg/setting ctx "--out" "LAYA_DATA" :data "data")]
-    (try (convert laya-home out)
+        out (cfg/setting ctx "--out" "LAYA_DATA" :data "data")
+        model (get opts "--model")
+        names (when (and (string? model) (not= model "all")) [model])]
+    (try (convert-bundle laya-home out names)
          (catch Exception e
-           (if (= :checkpoint-missing (:type (ex-data e)))
+           (if (#{:checkpoint-missing :unknown-model} (:type (ex-data e)))
              (do (binding [*out* *err*] (println "jolt prepare:" (ex-message e)))
                  (System/exit 1))
              (throw e))))))

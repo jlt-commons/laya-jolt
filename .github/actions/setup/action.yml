@@ -9,11 +9,14 @@ inputs:
     description: jolt release asset target (aarch64-macos or x86_64-linux)
     required: true
   laya-revision:
-    # The golden traces and the CRCs in golden/prepare.edn were dumped from this
-    # revision of convaiinnovations/laya. The suite pins to it, not to main: a
-    # newer upload would change the checksums and every parity test with them.
+    # The golden traces and the CRCs in golden/*prepare.edn were dumped from
+    # the checkpoints at this revision of convaiinnovations/laya (the first one
+    # that bundles typed-decisions/ and multilingual/; the english files are
+    # byte-identical to the 7c76b62 revision golden/ was first dumped from).
+    # The suite pins to it, not to main: a newer upload would change the
+    # checksums and every parity test with them.
     description: convaiinnovations/laya git revision to fetch
-    default: 7c76b622dfc5cac71b2dc1c29873efe2ce509a05
+    default: c5d78730f3493e4fe16d61507ef4b78eef7318cf
   jolt-pin:
     description: jolt release tag to use instead of the latest one
     default: ''
@@ -69,9 +72,10 @@ runs:
       shell: bash
       run: jolt kernels
 
-    # 800 MB from the Hub. The cache key is the revision, so a bump above
-    # refetches once and every OS shares the one entry (the files are the same
-    # bytes everywhere).
+    # 1.6 GB from the Hub: the english root and the typed-decisions subfolder
+    # (multilingual waits on its tokenizer port). The cache key is the
+    # revision, so a bump above refetches once and every OS shares the one
+    # entry (the files are the same bytes everywhere).
     - name: Cache the Laya checkpoint
       id: checkpoint
       uses: actions/cache@v4
@@ -84,16 +88,24 @@ runs:
       shell: bash
       env:
         REV: ${{ inputs.laya-revision }}
-        # sha256 of model.safetensors at that revision (its LFS blob id).
-        SHA256: 891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c
+        # sha256 of each model.safetensors at that revision (its LFS blob id)
+        SHA256_ENGLISH: 891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c
+        SHA256_TYPED_DECISIONS: 4fa56de72383a9d3efa9cfa78955733c81b9fc8067a587ca4beb82c78107a24e
       run: |
         base="https://huggingface.co/convaiinnovations/laya/resolve/${REV}"
-        mkdir -p "$HOME/laya/tokenizer" "$HOME/laya/encoder"
-        for f in model.safetensors tokenizer/tokenizer.json encoder/config.json rl_agent_config.json; do
-          curl -fsSL --retry 3 -o "$HOME/laya/$f" "$base/$f"
-        done
-        echo "$SHA256  $HOME/laya/model.safetensors" | shasum -a 256 -c -
+        fetch() {  # fetch <subdir-or-empty> : the four files jolt prepare reads
+          local sub="$1" dir="$HOME/laya${1:+/$1}"
+          mkdir -p "$dir/tokenizer" "$dir/encoder"
+          for f in model.safetensors tokenizer/tokenizer.json encoder/config.json rl_agent_config.json; do
+            curl -fsSL --retry 3 -o "$dir/$f" "$base/${sub:+$sub/}$f"
+          done
+        }
+        fetch ""
+        fetch typed-decisions
+        echo "$SHA256_ENGLISH  $HOME/laya/model.safetensors" | shasum -a 256 -c -
+        echo "$SHA256_TYPED_DECISIONS  $HOME/laya/typed-decisions/model.safetensors" | shasum -a 256 -c -
 
+    # every checkpoint under LAYA_HOME: data/ (english) and data/typed-decisions
     - name: Prepare data/
       shell: bash
       run: |

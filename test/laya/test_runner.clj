@@ -16,7 +16,8 @@
     laya.run-test
     laya.prepare-test
     laya.agent-test
-    laya.server-test])
+    laya.server-test
+    laya.checkpoints-test])
 
 (defn -main
   [& _]

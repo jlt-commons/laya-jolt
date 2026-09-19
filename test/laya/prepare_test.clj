@@ -60,3 +60,50 @@
       (is (str/includes? (ex-message e) dir)))
     (jolt.host/delete-tree! dir)
     (jolt.host/delete-tree! "target/prepare-test-empty-out")))
+
+(defn- fake-checkpoint! [dir]
+  (doseq [f prep/checkpoint-files]
+    (io/make-parents (io/file dir f))
+    (spit (str dir "/" f) "")))
+
+(deftest bundle-plan
+  ;; the Hub repo bundles three checkpoints: the root is english, the two
+  ;; subfolders are optional downloads
+  (let [home "target/prepare-plan"]
+    (jolt.host/delete-tree! home)
+    (fake-checkpoint! home)
+    (fake-checkpoint! (str home "/typed-decisions"))
+    (testing "english is the root, the others live in subfolders, both in and out"
+      (is (= [["english" home "out"]
+              ["typed-decisions" (str home "/typed-decisions") "out/typed-decisions"]]
+             (mapv (juxt :name :src :out) (prep/plan home "out" nil))))
+      (is (= "out/multilingual" (prep/out-dir "out" "multilingual"))))
+    (testing "a missing subfolder is skipped, not an error, unless asked for by name"
+      (is (= ["english" "typed-decisions"] (mapv :name (prep/plan home "out" nil))))
+      (is (= ["typed-decisions"] (mapv :name (prep/plan home "out" ["typed-decisions"]))))
+      (is (thrown-with-msg? Exception #"multilingual" (prep/plan home "out" ["multilingual"]))))
+    (testing "the root is required"
+      (jolt.host/delete-tree! (str home "/model.safetensors"))
+      (is (= :checkpoint-missing (:type (ex-data (try (prep/plan home "out" nil) nil (catch Exception e e)))))))
+    (testing "names are checked"
+      (is (= :unknown-model (:type (ex-data (try (prep/plan home "out" ["nope"]) nil (catch Exception e e)))))))
+    (jolt.host/delete-tree! home)))
+
+(deftest jolt-prepare-reproduces-typed-decisions
+  ;; same architecture and tokenizer as english, its own weights and config
+  (let [src (prep/checkpoint-dir laya-home "typed-decisions")]
+    (is (.exists (io/file src "model.safetensors"))
+        (str "typed-decisions checkpoint not found under " src " (download the subfolder of the Hub repo)"))
+    (let [golden (:files (edn/read-string (slurp (str golden-dir "/typed-decisions/prepare.edn"))))
+          out "target/prepare-test-td"]
+      (jolt.host/delete-tree! out)
+      (prep/convert src out)
+      (is (= 209 (count golden)))
+      (doseq [[fn {:keys [size crc32]}] golden]
+        (is (= [size crc32] (prep/file-crc32 (str out "/" fn))) fn))
+      (testing "the config carries the checkpoint's own limits and temperatures"
+        (let [cfg (edn/read-string (slurp (str out "/config.edn")))]
+          (is (= 1024 (:max-len cfg)))
+          (is (= 256 (:head-max-len cfg)))
+          (is (= [1.0148024559020996 1.0374259948730469 1.0575125217437744] (:temperature cfg)))))
+      (jolt.host/delete-tree! out))))

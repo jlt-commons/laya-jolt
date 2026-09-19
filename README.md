@@ -13,12 +13,21 @@ of typed questions, and returns calibrated typed answers.
 Everything is f32 end to end. F16 checkpoint weights are widened to f32 once,
 during `prepare`, so the numerics match the torch CPU oracle exactly.
 
-## Getting the checkpoint
+## Getting the checkpoints
 
 The weights are not in this repo and not in the GitHub `laya` repo either
 (that one is the Python package). They live on the Hugging Face Hub:
-**https://huggingface.co/convaiinnovations/laya**. `jolt prepare` reads four
-files from a checkpoint directory laid out like that repo:
+**https://huggingface.co/convaiinnovations/laya**, one repo bundling three
+checkpoints:
+
+| name | where in the repo | encoder | context | for |
+|---|---|---|---|---|
+| `english` | the root | ModernBERT-large, 421M | 512 | English text |
+| `typed-decisions` | `typed-decisions/` | ModernBERT-large, 421M | 1024 | the four typed-decisions workflows (invoice processing, security incidents, customer service, agent-trace observability) |
+| `multilingual` | `multilingual/` | mmBERT-base, 322M | 1024 | 100+ languages (its tokenizer is not ported yet; `prepare` skips it) |
+
+`jolt prepare` reads four files per checkpoint from a directory laid out
+like the repo: the root is english, the subfolders are optional.
 
 ```
 ../laya/
@@ -26,14 +35,19 @@ files from a checkpoint directory laid out like that repo:
   tokenizer/tokenizer.json
   encoder/config.json
   rl_agent_config.json
+  typed-decisions/           # same four files, optional
+  multilingual/              # same four files, optional
 ```
 
-Fetch them with nothing but curl:
+Fetch them with nothing but curl (drop `typed-decisions/` from the first
+loop if you only want english):
 
 ```
-mkdir -p ../laya/tokenizer ../laya/encoder
-for f in model.safetensors tokenizer/tokenizer.json encoder/config.json rl_agent_config.json; do
-  curl -fL -o ../laya/$f https://huggingface.co/convaiinnovations/laya/resolve/main/$f
+for sub in "" typed-decisions/; do
+  mkdir -p ../laya/${sub}tokenizer ../laya/${sub}encoder
+  for f in model.safetensors tokenizer/tokenizer.json encoder/config.json rl_agent_config.json; do
+    curl -fL -o ../laya/$sub$f https://huggingface.co/convaiinnovations/laya/resolve/main/$sub$f
+  done
 done
 ```
 
@@ -41,24 +55,27 @@ or clone the whole model repo with git-lfs (`git lfs install && git clone
 https://huggingface.co/convaiinnovations/laya ../laya`), or with the Hub CLI
 (`hf download convaiinnovations/laya --local-dir ../laya`). Put it anywhere
 and point `LAYA_HOME` at it (or `jolt -M:prepare --laya DIR --out data`).
-`jolt prepare` refuses a directory that lacks any of the four files and says
-so.
+`jolt prepare` converts every checkpoint it finds there into the same layout
+under the data root (`data/`, `data/typed-decisions`, `data/multilingual`);
+`--model NAME` converts one. It refuses a root that lacks any of the four
+files and says so.
 
 ## Build and run
 
 ```
 jolt kernels             # compile native/laya_kernels.c
-jolt prepare             # ../laya checkpoint -> data/
+jolt prepare             # every checkpoint under ../laya -> data/, data/typed-decisions, ...
 jolt -M:test             # parity suites vs golden/
 jolt -M:run demo         # README quickstart through the workflow runner
 jolt -M:serve            # HTTP API on http://127.0.0.1:8080
 jolt binary              # standalone ./laya-server, self-tested against golden/
 ```
 
-`jolt kernels` shells out to `cc`. `jolt prepare` needs only the checkpoint
-and the kernel library; it runs in a few seconds. No Python is involved
-anywhere; `golden/` holds the traces dumped from the torch CPU oracle and is
-checked in.
+`jolt kernels` shells out to `cc`. `jolt prepare` needs only the checkpoints
+and the kernel library; it runs in a few seconds per checkpoint. No Python
+is involved anywhere; `golden/` holds the traces dumped from the torch CPU
+oracle (english at the root, `golden/typed-decisions/` for that checkpoint)
+and is checked in.
 
 `jolt -M:run demo` prints the quickstart answer JSON. It should be identical
 to the `:system-one` value in `golden/readme.edn`.
@@ -265,8 +282,12 @@ suffixes in `deps.edn` if your distro's `libicuuc.so` version is not listed.
 ## Status
 
 Encoder, head, tokenizer, sequence, agent, the email workflow and the
-checkpoint conversion all match their golden traces. `system-one` on the quickstart case
-is byte-identical to the Python output.
+checkpoint conversion all match their golden traces, for the english and
+typed-decisions checkpoints. `system-one` on the quickstart case is
+byte-identical to the Python output on both. Language detection and the
+Router's decisions match the Python package on every pinned case; the
+multilingual checkpoint routes correctly but cannot be loaded until its
+tokenizer is ported.
 
 Per-forward temporaries live in an ffi arena that closes with the call, so a
 long-running process stays at the size of the weights (~1.7 GB f32).
