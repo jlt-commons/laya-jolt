@@ -7,16 +7,13 @@
   local_attention=128 the mask radius is 64 (torch: config.sliding_window =
   local_attention // 2), and a wrong radius silently corrupts every sliding
   layer beyond ~65 tokens."
-  (:require [clojure.edn :as edn]
+  (:require [clojure.data.json :as json]
+            [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]
             [laya.agent :as ag]
-            [laya.sequence :as seq]))
-
-(def golden-dir
-  (or (System/getenv "LAYA_GOLDEN") "golden"))
-
-(def data-dir
-  (or (System/getenv "LAYA_DATA") "data"))
+            [laya.email :as email]
+            [laya.sequence :as seq]
+            [laya.test-util :as tu :refer [golden-dir data-dir]]))
 
 (def agent (delay (ag/load-agent data-dir)))
 
@@ -45,7 +42,7 @@
 (defn- golden-system-one
   "json.dumps(RLAgent.system_one(...)) as captured in golden/readme.edn."
   []
-  (:system-one (edn/read-string (slurp (str golden-dir "/readme.edn")))))
+  (:system-one (tu/read-golden "readme")))
 
 (deftest sliding-window-is-half-local-attention
   (testing "encoder sliding radius = local_attention // 2 = 64"
@@ -69,6 +66,41 @@
           qs (array-map "q" {:type "choice" :instructions "pick one" :criteria many})]
       (is (thrown-with-msg? Exception #"do not fit in head_max_len"
                             (ag/system-one @agent "state" qs))))))
+
+(deftest malformed-questions-are-rejected
+  (testing "python fails on these with KeyError/AttributeError; we say why"
+    (let [run (fn [qdef] (ag/system-one @agent "state" {"q" qdef}))]
+      (is (thrown-with-msg? Exception #"unknown type" (run {:type "bool" :instructions "x"})))
+      (is (thrown-with-msg? Exception #"instructions" (run {:type "noul"})))
+      (is (thrown-with-msg? Exception #"criteria" (run {:type "choice" :instructions "x"})))
+      (is (thrown-with-msg? Exception #"criteria" (run {:type "choice" :instructions "x" :criteria {}})))
+      (is (thrown-with-msg? Exception #"criteria" (run {:type "choice" :instructions "x" :criteria "billing"})))
+      (is (thrown-with-msg? Exception #"at least 2" (run {:type "score" :instructions "x" :criteria ["only"]})))
+      (is (thrown-with-msg? Exception #"criteria" (run {:type "score" :instructions "x" :criteria {"a" "b"}})))
+      (is (thrown-with-msg? Exception #"criteria" (run {:type "noul" :instructions "x" :criteria ["yes" "no"]}))))
+    (testing "the failing question id is reported"
+      (is (thrown-with-msg? Exception #"\"bad_one\""
+                            (ag/system-one @agent "state" {"bad_one" {:type "nope" :instructions "x"}}))))))
+
+(deftest email-fanout-matches-python
+  (testing "email_state + email_questions (+ a 14-option choice) end to end, two emails"
+    (let [g (tu/read-golden "email_answers")
+          bodies (mapv first (:clean (tu/read-golden "email")))
+          qs (:questions g)]
+      (is (= 7 (count qs)))
+      (doseq [{:keys [body-index state result]} (:cases g)]
+        (let [st (email/email-state "Support request" (nth bodies body-index) :sender "someone@example.com")
+              want (json/read-str result)
+              got (json/read-str (seq/json-str (ag/system-one @agent st qs)))]
+          (is (= state st) "email-state rebuilds the Python state")
+          (is (= (get want "usage") (get got "usage")) "token count")
+          (is (= (into {} (map (fn [[k a]] [k [(get a "type") (get a "choice")]]) (get want "answers")))
+                 (into {} (map (fn [[k a]] [k [(get a "type") (get a "choice")]]) (get got "answers"))))
+              "types and choices")
+          ;; Python's calibrated softmax runs in float32, ours in doubles: a
+          ;; probability within ~1e-7 of a 4-decimal boundary may round to
+          ;; the neighbouring digit, so allow one unit in the last place.
+          (is (tu/approx= 1.0001e-4 want got) (str "body " body-index)))))))
 
 (deftest wide-choice-keeps-option-order
   (testing "past 8 options (and 8 questions) the answer maps must still follow input order"

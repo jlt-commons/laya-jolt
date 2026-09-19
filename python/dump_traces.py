@@ -19,6 +19,12 @@ Outputs EDN files under golden/:
                     max-abs stats, logits, act probs, RLAgent.system_one JSON
   email.edn       - email_utils.py reference: clean_email_body in/out pairs,
                     email_state and email_questions as JSON strings
+  sequences.edn   - build_sequence ids/markers for the branches the README
+                    case never takes (truncation, option shrink, [MASK] in
+                    the state, non-string instructions, noul criteria, ...)
+  email_answers.edn - system_one on email_state + email_questions (+ a
+                    14-option choice) for two emails: the end-to-end check
+                    on question shapes beyond the quickstart
 """
 import argparse
 import json
@@ -261,13 +267,19 @@ def main():
         return '"' + edn_escape(x if isinstance(x, str) else json.dumps(x, ensure_ascii=False)) + '"'
 
     def edn_of(x):
+        # dicts become #laya/omap [[k v] ...]: an EDN map literal past 8 keys
+        # reads back as a hash-map and the tests need Python's insertion order
+        if x is None:
+            return "nil"
+        if x is True or x is False:
+            return "true" if x else "false"
         if isinstance(x, str):
             return edn_str_of(x)
         if isinstance(x, dict):
-            return "{" + " ".join("%s %s" % (edn_str_of(k), edn_of(v)) for k, v in x.items()) + "}"
+            return "#laya/omap [" + " ".join("[%s %s]" % (edn_str_of(k), edn_of(v)) for k, v in x.items()) + "]"
         if isinstance(x, list):
             return "[" + " ".join(edn_of(v) for v in x) + "]"
-        return str(x).lower()
+        return repr(x)
 
     with open(os.path.join(args.out, "cases.edn"), "w") as f:
         f.write("{:tok-cases [\n")
@@ -293,6 +305,35 @@ def main():
         f.write(" :readme-state %s\n" % edn_of(readme_state))
         f.write(" :readme-questions %s}\n" % edn_of(readme_qs))
     print("wrote", os.path.join(args.out, "cases.edn"))
+
+    # ---- sequences.edn: build_sequence branches the README case never takes --
+    long_opts = {"option number %d" % i: "a fairly long description of this option that runs on for a while to eat the head budget" for i in range(12)}
+    SEQ_CASES = [
+        ("mask-injection", {"note": "[MASK] and [CLS] inside the state", "text": "please [MASK] this [CLS] token [SEP]"},
+         {"type": "noul", "instructions": "Is there a [MASK] token?"}),
+        ("long-state-truncates", {"body": ("word " * 600).strip()}, {"type": "noul", "instructions": "Is it long?"}),
+        ("many-long-options-shrink", "state", {"type": "choice", "instructions": "pick", "criteria": long_opts}),
+        ("long-instructions-truncate", "state", {"type": "score", "instructions": ("x " * 300).strip(), "criteria": ["a", "b", "c"]}),
+        ("dict-instructions-ascii", {"a": 1}, {"type": "noul", "instructions": {"rule": "caf\u00e9 \u2265 3", "n": 2.5, "ok": True, "none": None}}),
+        ("choice-null-desc", "state", {"type": "choice", "instructions": "which", "criteria": {"a": None, "b": "", "c": "desc", "d": 0}}),
+        ("choice-list", "state", {"type": "choice", "instructions": "which", "criteria": ["x", "y", "z"]}),
+        ("noul-criteria", "state", {"type": "noul", "instructions": "q", "criteria": {"true": "yes it is", "false": "no"}}),
+        ("score-many-levels", "s", {"type": "score", "instructions": "rate", "criteria": ["level %d desc" % i for i in range(11)]}),
+        ("unicode-state", {"from": "jos\u00e9@example.com", "body": "Merci \u2014 r\u00e9sum\u00e9 \u4e2d\u6587 \U0001F600 \u201cquotes\u201d\ttab\nnl"},
+         {"type": "noul", "instructions": "Is it non-ascii?"}),
+        ("numeric-state", {"amount": 0.0001, "big": 1e16, "n": 3, "ok": True, "none": None, "list": [1.5, 2, "x"]},
+         {"type": "noul", "instructions": "numbers?"}),
+        ("array-state", [{"role": "user", "text": "hi"}, {"role": "agent", "text": "hello"}],
+         {"type": "score", "instructions": "tone", "criteria": ["bad", "ok", "good"]}),
+    ]
+    body = "{"
+    for name, state, qdef in SEQ_CASES:
+        q = RLAgent._to_internal(qdef)
+        seq, markers = build_sequence(tok, state, q, cfg["max_len"], cfg["head_max_len"])
+        body += " %s {:state %s :question %s :ids %s :markers %s}\n" % (
+            edn_str_of(name), edn_of(state), edn_of(qdef), edn_vec(seq), edn_vec(markers))
+    body += "}\n"
+    write_edn(os.path.join(args.out, "sequences.edn"), body)
 
     # ---- tok.edn ----------------------------------------------------------
     body = "{:cases {\n"
@@ -456,6 +497,20 @@ def main():
         body += " :sdpa-layer-%d-stats [%.9g %.9g]\n" % (i, mx, l2)
     body += " :system-one %s}\n" % edn_str_of(json.dumps(result))
     write_edn(os.path.join(args.out, "readme.edn"), body)
+
+    # ---- email_answers.edn: system_one on email_state + email_questions -------
+    wide = {"type": "choice", "instructions": "Pick the closest topic.",
+            "criteria": {k: None for k in ["billing", "refund", "bug", "outage", "login", "pricing", "demo",
+                                           "hiring", "payroll", "legal", "shipping", "returns", "feedback", "other"]}}
+    eqs = email_utils.email_questions()
+    eqs["wide"] = wide
+    body = "{:questions %s\n :cases [\n" % edn_of(eqs)
+    for idx in (0, 5):
+        st = email_utils.email_state("Support request", EMAIL_BODIES[idx], sender="someone@example.com")
+        res = agent.system_one(st, eqs)
+        body += "  {:body-index %d :state %s :result %s}\n" % (idx, edn_of(st), edn_str_of(json.dumps(res)))
+    body += " ]}\n"
+    write_edn(os.path.join(args.out, "email_answers.edn"), body)
 
     # ---- email.edn: email_utils.py reference outputs -----------------------
     body = "{:clean [\n"

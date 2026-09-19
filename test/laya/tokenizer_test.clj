@@ -8,13 +8,8 @@
   ...) must be extracted leftmost-longest before ByteLevel pre-tokenization."
   (:require [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]
+            [laya.test-util :as tu :refer [golden-dir data-dir]]
             [laya.tokenizer :as tk]))
-
-(def golden-dir
-  (or (System/getenv "LAYA_GOLDEN") "golden"))
-
-(def data-dir
-  (or (System/getenv "LAYA_DATA") "data"))
 
 (def tok (delay (tk/load (str data-dir "/tokenizer.edn"))))
 
@@ -49,7 +44,7 @@
    "\r\nThe"])
 
 (deftest cases-match-oracle-inputs
-  (is (= cases (:tok-cases (edn/read-string (slurp (str golden-dir "/cases.edn")))))
+  (is (= cases (:tok-cases (tu/read-golden "cases")))
       "the local case list drifted from the one the oracle encoded"))
 
 (deftest encode-matches-golden
@@ -61,7 +56,7 @@
 
 (deftest pre-tokenize-matches-hf-scanner
   (testing "hand scanner == tokenizers ByteLevel(use_regex=true) boundaries"
-    (let [golden (:pre-tokens (edn/read-string (slurp (str golden-dir "/cases.edn"))))]
+    (let [golden (:pre-tokens (tu/read-golden "cases"))]
       (doseq [c cases]
         (is (= (get golden c) (tk/pre-tokenize c)) (pr-str c)))))
   (testing "only U+0020 is the optional prefix; other whitespace stands alone"

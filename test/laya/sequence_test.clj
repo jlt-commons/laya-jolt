@@ -9,14 +9,10 @@
   Expected strings below are the output of the CPython json module."
   (:require [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]
+            [laya.agent :as ag]
             [laya.sequence :as seq]
+            [laya.test-util :as tu :refer [golden-dir data-dir]]
             [laya.tokenizer :as tk]))
-
-(def golden-dir
-  (or (System/getenv "LAYA_GOLDEN") "golden"))
-
-(def data-dir
-  (or (System/getenv "LAYA_DATA") "data"))
 
 (def tok (delay (tk/load (str data-dir "/tokenizer.edn"))))
 
@@ -60,6 +56,16 @@
   (testing "keywords serialize by name, like the string keys Python sees"
     (is (= "{\"type\": \"choice\"}" (seq/json-str {:type :choice})))))
 
+(deftest temp-bucket-cardinalities
+  (is (= "choice:2" (seq/temp-bucket 0 1)))
+  (is (= "choice:2" (seq/temp-bucket 0 2)))
+  (is (= "score:3-5" (seq/temp-bucket 1 3)))
+  (is (= "score:3-5" (seq/temp-bucket 1 5)))
+  (is (= "noul:6-10" (seq/temp-bucket 2 6)))
+  (is (= "choice:6-10" (seq/temp-bucket 0 10)))
+  (is (= "choice:11+" (seq/temp-bucket 0 11)))
+  (is (= "choice:11+" (seq/temp-bucket 0 200))))
+
 (deftest ordered-map-survives-growth
   (let [ks (map str (range 30))]
     (is (= ks (keys (seq/ordered-map (map vector ks (range 30))))))
@@ -81,16 +87,31 @@
 
 (deftest build-sequence-matches-oracle
   (testing "README quickstart ids + markers, straight from golden/readme.edn"
-    (let [cases (edn/read-string (slurp (str golden-dir "/cases.edn")))
-          readme (edn/read-string (slurp (str golden-dir "/readme.edn")))
+    (let [cases (tu/read-golden "cases")
+          readme (tu/read-golden "readme")
           state (:readme-state cases)]
       (doseq [[qid qdef] (:readme-questions cases)]
-        (let [q {:t (get qdef "type") :ins (get qdef "instructions") :crit (get qdef "criteria")}
-              q (if (and (= "choice" (:t q)) (sequential? (:crit q)))
-                  (assoc q :crit (seq/ordered-map (map (fn [c] [c nil]) (:crit q))))
-                  q)
+        (let [q (ag/to-internal qdef)
               [ids markers] (seq/build-sequence @tok state q 512 192)
               gold (get (:input-ids readme) qid)]
           (is (= (mapv long (:ids gold)) ids) qid)
           (is (= (mapv long (:markers gold)) markers) qid)
-          (is (= (:qtype gold) (seq/qtypes (:t q))) qid))))))
+          (is (= (:qtype gold) (seq/qtypes (:t q))) qid)))))
+  (testing "the branches the quickstart never takes (golden/sequences.edn)"
+    (let [cases (tu/read-golden "sequences")]
+      (is (= 12 (count cases)))
+      (doseq [[name {:keys [state question ids markers]}] cases]
+        (let [q (ag/to-internal question)
+              [got-ids got-markers] (seq/build-sequence @tok state q 512 192)]
+          (is (= (mapv long ids) got-ids) name)
+          (is (= (mapv long markers) got-markers) name)))
+      (testing "what those cases pin down"
+        (let [ids (fn [k] (mapv long (get-in cases [k :ids])))]
+          (is (= 512 (count (ids "long-state-truncates"))) "hard max_len cut")
+          (is (= 50282 (peek (ids "long-state-truncates"))) "...but the final [SEP] survives")
+          (is (= 12 (count (get-in cases ["many-long-options-shrink" :markers]))) "12 options shrunk evenly all fit")
+          (is (= 2 (count (filter #{50284} (ids "mask-injection"))))
+              "[MASK] in the state and instructions is neutralized: only the two option markers remain")
+          (is (= 3 (count (filter #{50281} (ids "mask-injection"))))
+              "...while [CLS] in the state stays a special token (leading CLS + two in the state)")
+          (is (= 11 (count (get-in cases ["score-many-levels" :markers])))))))))

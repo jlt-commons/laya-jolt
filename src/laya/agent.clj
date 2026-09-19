@@ -20,6 +20,31 @@
   [qdef k]
   (if (contains? qdef k) (get qdef k) (get qdef (name k))))
 
+(defn- invalid [qid field msg]
+  (throw (ex-info (str "question " (pr-str qid) ": " msg)
+                  {:type :invalid-question :qid qid :field field})))
+
+(defn validate-question
+  "The shape rl_agent_api needs (it fails with KeyError/AttributeError
+  otherwise) and the Jev API documents: a known type, instructions, and
+  criteria fitting the type. Throws ex-info {:type :invalid-question}."
+  [qid qdef]
+  (when-not (map? qdef) (invalid qid nil "must be an object"))
+  (let [t (qget qdef :type)
+        crit (qget qdef :criteria)]
+    (when-not (contains? seq/qtypes t)
+      (invalid qid "type" (str "unknown type " (pr-str t) "; expected choice, score or noul")))
+    (when (nil? (qget qdef :instructions))
+      (invalid qid "instructions" "instructions is required"))
+    (case t
+      "choice" (when-not (or (and (map? crit) (seq crit)) (and (sequential? crit) (seq crit)))
+                 (invalid qid "criteria" "choice criteria must be a non-empty map of option -> description (or a list of options)"))
+      "score" (when-not (and (sequential? crit) (>= (count crit) 2))
+                (invalid qid "criteria" "score criteria must be a list of at least 2 levels"))
+      "noul" (when-not (or (nil? crit) (map? crit))
+               (invalid qid "criteria" "noul criteria must be a map with optional \"true\" / \"false\" descriptions")))
+    qdef))
+
 (defn to-internal
   "Jev question def -> {:t :ins :crit} (rl_agent_api.RLAgent._to_internal).
   A list of choice criteria becomes {c: None}; non-string instructions are
@@ -83,7 +108,7 @@
   (let [{:keys [cfg tok w]} agent
         qids (vec (keys questions))
         prepared (mapv (fn [qid]
-                         (let [q (to-internal (get questions qid))
+                         (let [q (to-internal (validate-question qid (get questions qid)))
                                [ids markers] (seq/build-sequence tok state q
                                                                  (:max-len cfg)
                                                                  (:head-max-len cfg))]
