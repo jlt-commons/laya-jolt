@@ -21,7 +21,8 @@
   default data/, data/multilingual, data/typed-decisions), loads an agent on
   first use and keeps :max-loaded of them resident, evicting the least
   recently used: all three together are ~4.6 GB of f32."
-  (:require [clojure.string :as str]
+  (:require [clojure.edn]
+            [clojure.string :as str]
             [laya.agent :as ag]
             [laya.lang :as lang]
             [laya.sequence :as seq]))
@@ -80,30 +81,53 @@
 ;; --- the router -----------------------------------------------------------------------
 
 (defn load-prepared
-  "The default loader: laya.agent/load-agent on a prepared data directory.
-  Throws {:type :model-unavailable} when there is nothing there."
-  [name dir]
-  (when-not (and dir (.exists (clojure.java.io/file dir "manifest.edn")))
-    (throw (ex-info (str "checkpoint " name " is not prepared (no " dir "/manifest.edn); "
-                         "run jolt prepare for it or point :models at its data directory")
-                    {:type :model-unavailable :model name :dir dir})))
-  (ag/load-agent dir))
+  "The default loader: laya.agent/load-agent on a prepared data directory,
+  with the sequence limits configured for that checkpoint. Throws
+  {:type :model-unavailable} when there is nothing there."
+  ([name dir] (load-prepared name dir nil))
+  ([name dir limits]
+   (when-not (and dir (.exists (clojure.java.io/file dir "manifest.edn")))
+     (throw (ex-info (str "checkpoint " name " is not prepared (no " dir "/manifest.edn); "
+                          "run jolt prepare for it or point :models at its data directory")
+                     {:type :model-unavailable :model name :dir dir})))
+   (ag/load-agent dir limits)))
 
 (defn make-router
   "Options: :models {name data-dir} (default (default-models \"data\")),
   :data root for default-models, :max-loaded (default 1), :default
-  checkpoint (\"english\"), :auto-task-detection (false), :loader
-  (fn [name dir] agent) for tests (default laya.agent/load-agent on dir)."
-  [{:keys [models data max-loaded default auto-task-detection loader]
+  checkpoint (\"english\"), :auto-task-detection (false), :limits
+  {:max-len :head-max-len} for every checkpoint and :checkpoints {name
+  {...}} per checkpoint (laya.config/limits builds these from config.edn),
+  :loader (fn [name dir limits] agent) for tests (default load-prepared)."
+  [{:keys [models data max-loaded default auto-task-detection loader limits checkpoints]
     :or {max-loaded 1 default "english" auto-task-detection false}}]
   {:models (into (default-models (or data "data"))
                  (map (fn [[k v]] [(normalise-name k) v])) models)
    :max-loaded (max 1 (long max-loaded))
    :default (normalise-name default)
    :auto-task-detection (boolean auto-task-detection)
+   :limits (or limits {})
+   :checkpoints (into {} (map (fn [[k v]] [(normalise-name k) v])) checkpoints)
    :loader (or loader load-prepared)
    :agents (atom {})
    :order (atom [])})            ; least recently used first
+
+(defn limits-for
+  "The configured sequence limits for one checkpoint: the router-wide ones
+  under its per-checkpoint entry."
+  [router name]
+  (merge (:limits router) (get (:checkpoints router) (normalise-name name))))
+
+(defn effective-limits
+  "{:max-len :head-max-len} the checkpoint runs with: its prepared config.edn
+  under the configured overrides; nil when it is not prepared."
+  [router name]
+  (let [key (normalise-name name)
+        dir (get (:models router) key)
+        f (clojure.java.io/file dir "config.edn")]
+    (when (and dir (.exists f))
+      (let [cfg (clojure.edn/read-string (slurp f))]
+        (merge (select-keys cfg [:max-len :head-max-len]) (limits-for router key))))))
 
 (defn preloaded
   "A router that already holds `agent` as checkpoint `name` (default
@@ -150,7 +174,7 @@
     (if-let [agent (get @(:agents router) key)]
       (do (touch! router key) agent)
       (let [dir (get (:models router) key)]
-        (let [agent ((:loader router) key dir)]
+        (let [agent ((:loader router) key dir (limits-for router key))]
           (swap! (:agents router) assoc key agent)
           (touch! router key)
           (evict! router)

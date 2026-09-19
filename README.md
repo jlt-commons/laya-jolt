@@ -118,7 +118,9 @@ variable > `config.edn` > default**. `config.edn` lives in
  :workflow-dirs ["/Users/me/src/decisions/workflows"]   ; extra workflow directories
  :port 8080 :host "127.0.0.1" :api-key "s3cret"        ; server defaults
  :max-loaded 2 :default-model "english"                 ; checkpoints kept resident; the one loaded at startup
- :auto-task-detection false}                            ; route typed-decisions question sets to that checkpoint
+ :auto-task-detection false                             ; route typed-decisions question sets to that checkpoint
+ :max-len 768 :head-max-len 192                         ; sequence limits for every checkpoint (see Context)
+ :checkpoints {"multilingual" {:max-len 2048}}}         ; ... and per checkpoint, which wins
 ```
 
 | setting | flag | environment | `config.edn` | default |
@@ -130,11 +132,92 @@ variable > `config.edn` > default**. `config.edn` lives in
 | resident checkpoints | `--max-loaded N` | `LAYA_MAX_LOADED` | `:max-loaded` | `1` |
 | startup / fallback checkpoint | `--default-model NAME` | `LAYA_DEFAULT_MODEL` | `:default-model` | `english` |
 | typed-decisions by question ids | `--auto-task-detection` | — | `:auto-task-detection` | off |
+| sequence limits | `--max-len N` `--head-max-len N` | `LAYA_MAX_LEN` `LAYA_HEAD_MAX_LEN` | `:max-len` `:head-max-len`, `:checkpoints {"name" {…}}` | the checkpoint's own (`rl_agent_config.json`) |
 | goldens (`--self-test`) | `--golden DIR` | `LAYA_GOLDEN` | `:golden` | `golden` |
 
 `--workflows` and `LAYA_WORKFLOWS` are the exception to "adds": they name
 exactly the directories to scan, replacing the defaults, so a test or a
 one-off run is isolated from whatever is in `~/.config/laya`.
+
+## Context: what the model sees
+
+Laya has no sessions, turns or memory. Every call is one stateless forward
+pass, and the context is exactly the `state` you pass; the server caches
+loaded weights, nothing else. For each question, `build-sequence` lays out
+
+```
+[CLS] <type> question: <instructions> [SEP] [MASK] option 0 [MASK] option 1 … [SEP] <state> [SEP]
+```
+
+and the encoder reads it bidirectionally in one pass; the head scores the
+`[MASK]` marker of each option. The questions in a call share the state but
+are independent rows: nothing passes between them, and nothing survives the
+call.
+
+**Budget.** `max_len` is 512 tokens on `english`, 1024 on `typed-decisions`
+and `multilingual`, as trained. Instructions and options get up to
+`head_max_len` (192 / 256; long option lists are shrunk evenly, then the
+instructions), the state gets the rest. Measured on the bundled workflows:
+427–478 state tokens per question on `english` (roughly 1,700–1,900
+characters of English prose, less for JSON), 940–990 on the other two. What
+does not fit is dropped from the **end**, silently: the first tokens of the
+serialized state are kept. That is why the `email` workflow strips quoted
+history, signatures and disclaimers and caps the body at 3,000 characters
+before the model sees anything. `usage.input_tokens` in every answer is the
+total over all questions, so it tells you when a state is being cut.
+
+Both limits are yours to change: `:max-len` / `:head-max-len` in
+`config.edn` (for every checkpoint, or per name under `:checkpoints`),
+`--max-len` / `--head-max-len`, or `LAYA_MAX_LEN` / `LAYA_HEAD_MAX_LEN`
+(Configuration). They apply when a checkpoint loads; `GET /v1/models`
+reports the effective values and the server log says `max_len 768 (trained
+512)`. RoPE has no position table, so a longer sequence runs fine
+mechanically and simply reads more of the state; the checkpoints were
+trained at 512 / 1024, and answer quality past that is unmeasured, so raise
+it deliberately and check on your own data. Lowering `head_max_len` buys
+state room at the cost of shrinking long option texts sooner.
+
+**Shaping the state.** A string is tokenized as is; a map or vector is
+serialized like Python's `json.dumps` (key order kept, `ensure_ascii` off)
+and the keys are tokens too. Name them and refer to them in the
+instructions with backticks, the way the presets do:
+
+```clojure
+(ag/system-one agent
+  {"ticket" "Charged twice, want my money back" "plan" "pro" "account_age_days" 412}
+  {"churn_risk" {"type" "noul" "instructions" "Does `ticket` suggest the customer may cancel?"}})
+```
+
+Put the facts the decision needs in the state, and only those: a short,
+structured state beats a long raw one both for the budget and for the
+answers.
+
+**Conversations.** The state can be the trajectory so far, a vector of
+turns:
+
+```clojure
+(def turns [{"role" "user" "text" "My payouts have failed for three days."}
+            {"role" "agent" "text" "I see two failed transfers. Can you confirm the account ending 4411?"}
+            {"role" "user" "text" "Yes. If this isn't fixed today I'm moving to Stripe."}])
+(ag/system-one agent turns
+  {"churn_risk" {"type" "noul" "instructions" "Will this customer leave?"}
+   "needs_human" {"type" "noul" "instructions" "Should a person take over this conversation?"}})
+```
+
+The checkpoints were trained on conversation prefixes with TD(λ = 1)
+targets, so re-asking the same questions on the growing prefix after each
+turn is the intended use; `rl_agent_config.json` (`max_prefixes 6`) shows
+the depth the training used. Your application holds the turns; when they
+outgrow the budget, pass the last few or a summary you produce elsewhere.
+
+**Chaining.** Multi-step decisions are successive calls with state you
+assemble: `guard` before anything else, `llm-router` to pick a model, then
+the workflow for the request. `action.act_probability` in every answer is
+the act head's estimate that the system should act rather than escalate,
+which is the natural input to gating between calls. A server-side session
+store (append a turn, re-run a workflow on the trajectory) is an
+application-layer feature the upstream package does not have either; the
+workflow contract is where it would go.
 
 ## Workflows
 

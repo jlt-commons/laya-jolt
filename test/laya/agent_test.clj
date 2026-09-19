@@ -161,3 +161,26 @@
       (is (number? p))
       (is (not (Double/isNaN p)))
       (is (contains? #{0.0 1.0} p) "a floored temperature saturates the softmax"))))
+
+(deftest sequence-limits-can-be-raised-or-lowered
+  ;; the checkpoint's rl_agent_config gives 512 / 192; ~/.config/laya can change
+  ;; them per load. RoPE has no position table, so a longer max-len simply
+  ;; leaves more room for the state.
+  (let [base @agent
+        long-state {"body" (apply str (repeat 500 "word "))}
+        q {"q" {"type" "noul" "instructions" "Is it long?"}}
+        tokens (fn [ag*] (get-in (ag/system-one ag* long-state q) ["usage" "input_tokens"]))]
+    (is (= 512 (:max-len (:cfg base))))
+    (is (= 512 (tokens base)) "the state is cut to fill max_len")
+    (let [wide (ag/with-limits base {:max-len 1024})]
+      (is (= 1024 (:max-len (:cfg wide))))
+      (is (= 192 (:head-max-len (:cfg wide))) "untouched keys keep the checkpoint's values")
+      (is (= 512 (:trained-max-len wide)) "the trained length is remembered for the logs")
+      (is (> (tokens wide) 512) "more of the state is read"))
+    (let [narrow (ag/with-limits base {:max-len 256 :head-max-len 64})]
+      (is (= 256 (tokens narrow))))
+    (testing "the same through load-agent"
+      (is (= 640 (:max-len (:cfg (ag/load-agent tu/data-dir {:max-len 640}))))))
+    (testing "nonsense is refused"
+      (doseq [bad [{:max-len 0} {:max-len "big"} {:head-max-len 512 :max-len 512} {:head-max-len 4}]]
+        (is (thrown? Exception (ag/with-limits base bad)) (pr-str bad))))))

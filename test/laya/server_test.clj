@@ -80,7 +80,7 @@
           (is (= ["body" k] (get-in b ["detail" 0 "loc"])) k))))))
 
 (deftest route-without-inference
-  (let [boom (fn [name _] (throw (ex-info (str "must not load " name) {})))
+  (let [boom (fn [name & _] (throw (ex-info (str "must not load " name) {})))
         h (srv/handler (router/make-router {:loader boom}) {})]
     (testing "POST /v1/route answers the decision and loads nothing"
       (let [[st b] (call h (req :post "/v1/route" :body (seq/json-str {"state" {"body" "\u092e\u0941\u091d\u0938\u0947 \u0926\u094b"}})))]
@@ -103,6 +103,9 @@
         (is (= "convaiinnovations/laya" (get-in b ["models" "english" "repo"])))
         (is (true? (get-in b ["models" "english" "loaded"])))
         (is (true? (get-in b ["models" "english" "available"])))
+        (is (= {"max_len" 512 "head_max_len" 192} (get-in b ["models" "english" "limits"])))
+        (is (= (get-in b ["models" "multilingual" "available"]) (some? (get-in b ["models" "multilingual" "limits"])))
+            "limits are known exactly when the checkpoint is prepared")
         (is (= "english" (get b "default")))))
     (testing "GET /v1/workflows: name, description, question ids, whether options are taken"
       (let [[st b] (call h (req :get "/v1/workflows"))]

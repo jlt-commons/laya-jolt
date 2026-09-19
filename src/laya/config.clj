@@ -4,10 +4,15 @@
   entry point follows: CLI flag > environment variable > config.edn > default.
 
   config.edn keys:
-    :data            prepared model directory (jolt prepare --out)
+    :data            prepared data root (jolt prepare --out)
     :laya-home       checkpoint directory jolt prepare reads
     :workflow-dirs   extra directories of workflow .clj files
-    :port :host :api-key   server defaults
+    :port :host :api-key :max-loaded :default-model :auto-task-detection
+                     server defaults
+    :max-len :head-max-len
+                     sequence limits for every checkpoint, instead of the
+                     ones prepare took from rl_agent_config.json
+    :checkpoints     {\"name\" {:max-len .. :head-max-len ..}} per checkpoint
 
   Environment:
     LAYA_CONFIG_DIR  instead of $XDG_CONFIG_HOME/laya or ~/.config/laya
@@ -93,3 +98,27 @@
       :else (vec (concat ["workflows"]
                          (:workflow-dirs config)
                          [(str (config-dir env) "/workflows")])))))
+
+(defn- as-int [v]
+  (cond (integer? v) (long v)
+        (string? v) (Long/parseLong (str/trim v))
+        :else (throw (ex-info (str "not an integer: " (pr-str v)) {:value v}))))
+
+(defn limits
+  "The sequence limits configured for checkpoint `name`: {:max-len
+  :head-max-len}, only the keys that are set. config.edn's top-level keys
+  apply to every checkpoint, its :checkpoints {name {...}} entry to one;
+  LAYA_MAX_LEN / LAYA_HEAD_MAX_LEN and --max-len / --head-max-len beat both,
+  for every checkpoint. {} means the checkpoint's own values stand."
+  [{:keys [opts env config]} name]
+  (let [pick (fn [m k] (when (contains? m k) {k (as-int (get m k))}))
+        layer (fn [m] (merge (pick m :max-len) (pick m :head-max-len)))
+        from-env (merge (when-let [v (getenv env "LAYA_MAX_LEN")] {:max-len (as-int v)})
+                        (when-let [v (getenv env "LAYA_HEAD_MAX_LEN")] {:head-max-len (as-int v)}))
+        from-cli (merge (when (string? (get opts "--max-len")) {:max-len (as-int (get opts "--max-len"))})
+                        (when (string? (get opts "--head-max-len")) {:head-max-len (as-int (get opts "--head-max-len"))}))]
+    (or (merge (layer config)
+               (layer (get-in config [:checkpoints name] {}))
+               from-env
+               from-cli)
+        {})))

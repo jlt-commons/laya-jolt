@@ -110,7 +110,7 @@
           readme (golden n "readme")
           cases (golden n "cases")
           rt (router/make-router {:models {n (str tu/data-dir "/" n)}
-                                  :loader (fn [name _] (if (= name n) ag* (throw (ex-info "wrong checkpoint" {:name name}))))})]
+                                  :loader (fn [name & _] (if (= name n) ag* (throw (ex-info "wrong checkpoint" {:name name}))))})]
       (testing (str n ": the quickstart (byte for byte under Accelerate)")
         (tu/answers-match (:system-one readme)
                           (seq/json-str (ag/system-one ag* (:readme-state cases) (:readme-questions cases)))))

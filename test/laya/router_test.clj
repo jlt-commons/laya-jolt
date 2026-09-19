@@ -13,7 +13,7 @@
 (defn- fake-loader
   "Stands in for load-agent: records the order of loads."
   [log]
-  (fn [name dir] (swap! log conj name) {:fake name :dir dir}))
+  (fn [name dir & _] (swap! log conj name) {:fake name :dir dir}))
 
 (deftest route-decisions-match-python
   (doseq [{:keys [name state questions kw auto-task default decision]} (:cases @golden)]
@@ -90,7 +90,7 @@
   (let [r (router/make-router {:models {"english" tu/data-dir "multilingual" "target/not-prepared"}
                                ;; the suite's one english agent; other names go through the
                                ;; default loader so the not-prepared path is still exercised
-                               :loader (fn [name dir] (if (= name "english") @tu/agent (router/load-prepared name dir)))})
+                               :loader (fn [name dir limits] (if (= name "english") @tu/agent (router/load-prepared name dir limits)))})
         cases (tu/read-golden "cases")
         out (router/predict r (:readme-state cases) (:readme-questions cases))]
     (is (= ["model" "answers" "usage" "routing"] (keys out)))
@@ -103,3 +103,17 @@
                    (catch Exception e e))]
         (is (= :model-unavailable (:type (ex-data e))))
         (is (= "multilingual" (:model (ex-data e))))))))
+
+(deftest limits-reach-the-loader
+  (let [seen (atom nil)
+        r (router/make-router {:limits {:max-len 768}
+                               :checkpoints {"multilingual" {:max-len 2048 :head-max-len 300}}
+                               :loader (fn [name dir limits] (reset! seen [name dir limits]) {:fake name})})]
+    (router/load-model r "english")
+    (is (= ["english" "data" {:max-len 768}] @seen))
+    (router/load-model r "ml")
+    (is (= ["multilingual" "data/multilingual" {:max-len 2048 :head-max-len 300}] @seen))
+    (testing "effective limits for the listing: the checkpoint's config.edn plus overrides"
+      (is (= {:max-len 768 :head-max-len 192} (router/effective-limits r "english")))
+      (is (= {:max-len 2048 :head-max-len 300} (router/effective-limits r "multilingual")))
+      (is (nil? (router/effective-limits (router/make-router {:models {"english" "target/nowhere"} :loader (fn [& _])}) "english"))))))

@@ -231,7 +231,10 @@
                                       [name (seq/ordered-map [["repo" (get router/repos name)]
                                                               ["data" dir]
                                                               ["available" (router/available? rt name)]
-                                                              ["loaded" (contains? loaded name)]])]))]]))))
+                                                              ["loaded" (contains? loaded name)]
+                                                              ["limits" (when-let [l (router/effective-limits rt name)]
+                                                                          (seq/ordered-map [["max_len" (:max-len l)]
+                                                                                            ["head_max_len" (:head-max-len l)]]))]])]))]]))))
 
 (defn- list-workflows [workflows]
   (json-response 200 {"workflows"
@@ -351,10 +354,12 @@
 (defn -main
   "jolt -M:serve [--data DIR] [--port N] [--host ADDR] [--api-key KEY]
                  [--max-loaded N] [--default-model NAME] [--workflows DIR[:DIR]]
+                 [--max-len N] [--head-max-len N]
    Each falls back to an environment variable (LAYA_DATA, PORT, LAYA_HOST,
-   LAYA_API_KEY, LAYA_MAX_LOADED, LAYA_DEFAULT_MODEL, LAYA_WORKFLOWS), then to
-   ~/.config/laya/config.edn (:data :port :host :api-key :max-loaded
-   :default-model :auto-task-detection :workflow-dirs), then to a default.
+   LAYA_API_KEY, LAYA_MAX_LOADED, LAYA_DEFAULT_MODEL, LAYA_WORKFLOWS,
+   LAYA_MAX_LEN, LAYA_HEAD_MAX_LEN), then to ~/.config/laya/config.edn (:data
+   :port :host :api-key :max-loaded :default-model :auto-task-detection
+   :workflow-dirs :max-len :head-max-len :checkpoints), then to a default.
    DIR is the data root jolt prepare writes: DIR/ (english),
    DIR/multilingual, DIR/typed-decisions; the default checkpoint is loaded
    at startup, the others on first use.
@@ -368,7 +373,10 @@
                                 :max-loaded (Long/parseLong (str (arg "--max-loaded" "LAYA_MAX_LOADED" :max-loaded "1")))
                                 :default (arg "--default-model" "LAYA_DEFAULT_MODEL" :default-model "english")
                                 :auto-task-detection (or (true? (get opts "--auto-task-detection"))
-                                                         (true? (:auto-task-detection (:config ctx))))})
+                                                         (true? (:auto-task-detection (:config ctx))))
+                                ;; cfg/limits resolves CLI > env > config per name; the
+                                ;; router keeps the per-checkpoint results
+                                :checkpoints (into {} (map (fn [n] [n (cfg/limits ctx n)])) router/names)})
         log (fn [& xs] (binding [*out* *err*] (apply println "laya:" xs)))
         t0 (System/nanoTime)
         _ (log "loading" (:default rt) "from" (get (:models rt) (:default rt)) "...")
@@ -377,7 +385,12 @@
                      (if (= :model-unavailable (:type (ex-data e)))
                        (do (log (ex-message e)) (System/exit 1))
                        (throw e))))
-        _ (log (format "%d tensors loaded in %.1fs" (count (:w agent)) (/ (- (System/nanoTime) t0) 1e9)))]
+        _ (log (format "%d tensors loaded in %.1fs; max_len %d%s, head_max_len %d"
+                       (count (:w agent)) (/ (- (System/nanoTime) t0) 1e9)
+                       (:max-len (:cfg agent))
+                       (if (not= (:max-len (:cfg agent)) (:trained-max-len agent))
+                         (str " (trained " (:trained-max-len agent) ")") "")
+                       (:head-max-len (:cfg agent))))]
     (if (get opts "--self-test")
       (let [results (self-test agent (arg "--golden" "LAYA_GOLDEN" :golden "golden"))]
         (doseq [[name ok? detail] results]

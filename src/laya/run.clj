@@ -1,5 +1,6 @@
 (ns laya.run
   "jolt -M:run <workflow> [input] [--options JSON] [--data DIR] [--workflows DIR[:DIR]]
+              [--max-len N] [--head-max-len N]
    jolt -M:run --list
 
   Run one workflow (laya.workflows) against the prepared model and print the
@@ -55,7 +56,8 @@
       (nil? name) (do (println (:doc (meta (find-ns 'laya.run)))) (System/exit 2))
       :else
       (try
-        (let [agent (ag/load-agent (cfg/setting ctx "--data" "LAYA_DATA" :data "data"))]
+        (let [agent (ag/load-agent (cfg/setting ctx "--data" "LAYA_DATA" :data "data")
+                                   (cfg/limits ctx "english"))]
           (println (seq/json-str (run-workflow agent dirs name input (get opts "--options")))))
         (catch Exception e
           (if (#{:invalid-request :invalid-question} (:type (ex-data e)))

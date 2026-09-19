@@ -63,3 +63,20 @@
   (testing "--workflows DIR beats the environment"
     (is (= ["/cli"]
            (cfg/workflow-dirs {:opts {"--workflows" "/cli"} :env {"LAYA_WORKFLOWS" "/a"} :config {}})))))
+
+(deftest sequence-limits
+  (let [config {:max-len 768 :head-max-len 200
+                :checkpoints {"multilingual" {:max-len 2048} "typed-decisions" {:head-max-len 300}}}]
+    (testing "top-level keys apply to every checkpoint, :checkpoints entries win per name"
+      (is (= {:max-len 768 :head-max-len 200} (cfg/limits {:opts {} :env {} :config config} "english")))
+      (is (= {:max-len 2048 :head-max-len 200} (cfg/limits {:opts {} :env {} :config config} "multilingual")))
+      (is (= {:max-len 768 :head-max-len 300} (cfg/limits {:opts {} :env {} :config config} "typed-decisions"))))
+    (testing "env and CLI beat config, for every checkpoint"
+      (is (= {:max-len 1024 :head-max-len 200}
+             (cfg/limits {:opts {} :env {"LAYA_MAX_LEN" "1024"} :config config} "multilingual")))
+      (is (= {:max-len 640 :head-max-len 128}
+             (cfg/limits {:opts {"--max-len" "640" "--head-max-len" "128"} :env {"LAYA_MAX_LEN" "1024"} :config config} "english"))))
+    (testing "nothing configured -> {} (the checkpoint's own values stand)"
+      (is (= {} (cfg/limits {:opts {} :env {} :config {}} "english"))))
+    (testing "values are integers whatever the source"
+      (is (= {:max-len 700} (cfg/limits {:opts {} :env {} :config {:max-len "700"}} "english"))))))

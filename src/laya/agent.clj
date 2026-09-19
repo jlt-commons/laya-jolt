@@ -7,13 +7,35 @@
             [laya.sequence :as seq]
             [laya.tokenizer :as tk]))
 
+(defn with-limits
+  "The agent with :max-len / :head-max-len overridden (only the keys given).
+  The checkpoint's trained max_len is kept as :trained-max-len for the logs:
+  RoPE has no position table, so a longer sequence works mechanically, but
+  quality past the trained length is unmeasured. Throws on values that
+  cannot form a sequence."
+  [agent {:keys [max-len head-max-len] :as limits}]
+  (let [cfg (:cfg agent)
+        max-len (or max-len (:max-len cfg))
+        head-max-len (or head-max-len (:head-max-len cfg))
+        bad (fn [msg] (throw (ex-info (str "invalid sequence limits " (pr-str limits) ": " msg)
+                                      {:type :invalid-limits :limits limits})))]
+    (when-not (and (integer? max-len) (integer? head-max-len)) (bad "max-len and head-max-len must be integers"))
+    (when (< head-max-len 16) (bad "head-max-len must be at least 16 (build_sequence's own floor)"))
+    (when (< max-len (+ head-max-len 8)) (bad "max-len must exceed head-max-len with room for the state"))
+    (-> agent
+        (update :cfg assoc :max-len max-len :head-max-len head-max-len)
+        (assoc :trained-max-len (or (:trained-max-len agent) (:max-len cfg))))))
+
 (defn load-agent
-  "Load config + tokenizer + all weights from data-dir."
-  [data-dir]
-  (let [manifest (edn/read-string (slurp (str data-dir "/manifest.edn")))
-        cfg (edn/read-string (slurp (str data-dir "/config.edn")))
-        tok (tk/load (str data-dir "/tokenizer.edn"))]
-    {:cfg cfg :tok tok :w (m/load-weights manifest data-dir)}))
+  "Load config + tokenizer + all weights from data-dir; `limits`
+  ({:max-len :head-max-len}, see with-limits) override the checkpoint's."
+  ([data-dir] (load-agent data-dir nil))
+  ([data-dir limits]
+   (let [manifest (edn/read-string (slurp (str data-dir "/manifest.edn")))
+         cfg (edn/read-string (slurp (str data-dir "/config.edn")))
+         tok (tk/load (str data-dir "/tokenizer.edn"))
+         agent {:cfg cfg :tok tok :w (m/load-weights manifest data-dir) :trained-max-len (:max-len cfg)}]
+     (if (seq limits) (with-limits agent limits) agent))))
 
 (defn- qget
   "Question defs may carry keyword keys (Clojure literals) or string keys
