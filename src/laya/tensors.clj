@@ -142,20 +142,24 @@
 
 ;; --- ops ----------------------------------------------------------------------
 
-(defn mmul
-  "out = X @ W^T. X [m x k], W [n x k] -> out [m x n]. torch Linear."
-  [X W]
+(defn mmul!
+  "out = X @ W^T into the given out [m x n]. X [m x k], W [n x k]. torch Linear."
+  [out X W]
   (let [[m k] (:shape X)
         [n k2] (:shape W)]
-    (when (or (nil? n) (not= k k2))
-      (throw (ex-info "mmul shape mismatch" {:x (:shape X) :w (:shape W)})))
-    (let [out (make [m n])]
-      (cblas-sgemm* RowMajor NoTrans Trans
-                    (long m) (long n) (long k)
-                    1.0 (:p X) (long k)
-                    (:p W) (long k)
-                    0.0 (:p out) (long n))
-      out)))
+    (when (or (nil? n) (not= k k2) (not= [m n] (:shape out)))
+      (throw (ex-info "mmul shape mismatch" {:x (:shape X) :w (:shape W) :out (:shape out)})))
+    (cblas-sgemm* RowMajor NoTrans Trans
+                  (long m) (long n) (long k)
+                  1.0 (:p X) (long k)
+                  (:p W) (long k)
+                  0.0 (:p out) (long n))
+    out))
+
+(defn mmul
+  "out = X @ W^T. X [m x k], W [n x k] -> a new out [m x n]. torch Linear."
+  [X W]
+  (mmul! (make [(first (:shape X)) (first (:shape W))]) X W))
 
 (defn embeddings
   "Gather rows then LayerNorm (weight-only, norm_bias=false) exactly as
@@ -174,15 +178,19 @@
     (gather-rows* (:p src) (:p ids) (long n) (long d) (:p out))
     out))
 
-(defn layernorm
-  "LayerNorm with optional bias (torch nn.LayerNorm)."
-  ([x w eps] (layernorm x w 0 eps))
-  ([x w b eps]
+(defn layernorm!
+  "LayerNorm with optional bias (torch nn.LayerNorm), into out [n x d]."
+  ([out x w eps] (layernorm! out x w 0 eps))
+  ([out x w b eps]
    (let [[n d] (:shape x)
-         out (make [n d])
          bp (if (map? b) (long (:p b)) 0)]
      (layernorm* (:p x) (:p w) bp (long n) (long d) (float eps) (:p out))
      out)))
+
+(defn layernorm
+  "LayerNorm with optional bias (torch nn.LayerNorm), into a new tensor."
+  ([x w eps] (layernorm x w 0 eps))
+  ([x w b eps] (layernorm! (make (:shape x)) x w b eps)))
 
 (defn gelu [x]
   (let [n (:size x) out (make (:shape x))]
@@ -194,12 +202,16 @@
     (relu* (:p x) (long n) (:p out))
     out))
 
-(defn swiglu
+(defn swiglu!
   "in [n x 2*mid] -> out [n x mid], act(input)*gate with erf-gelu."
-  [x mid]
-  (let [[n _] (:shape x) out (make [n mid])]
+  [out x mid]
+  (let [[n _] (:shape x)]
     (swiglu* (:p x) (long n) (long mid) (:p out))
     out))
+
+(defn swiglu
+  [x mid]
+  (swiglu! (make [(first (:shape x)) mid]) x mid))
 
 (defn rope-tables
   [theta d len]
@@ -252,10 +264,12 @@
     (masked-softmax* (:p scores) (:p allowed) (long cols) (long rows) (long cols) (:p out))
     out))
 
-(defn attention
+(defn attention!
   "softmax(scale * Q K^T over the allowed keys) V for every head. q/k/v
   head-major [H*L x hd] (lla_split_qkv's layout), allowed [L x L] bytes ->
-  token-major ctx [L x (H*hd)].
+  token-major ctx [L x (H*hd)], written into `ctx`; S and P are score
+  buffers of at least [min(L, block) x min(L, block + 2*window)], or
+  [L x L] for the full path.
 
   The two products per head are sgemm calls, the same two gemms torch's
   math-path SDPA runs: each head's q/k/v block is already contiguous, and
@@ -268,40 +282,42 @@
   L=1024 layer touches 256 keys per query instead of 1024. The mask is
   still applied inside the block, so the band is only a saving, never the
   semantics; the full path is one block of everything."
+  [ctx S P qh kh vh allowed H L hd scale window]
+  (let [d (* H hd)
+        block (if (neg? window) L (max 1 (* 2 window)))
+        reach (if (neg? window) 0 window)
+        head-bytes (* 4 L hd)]
+    (dotimes [h H]
+      (loop [i0 0]
+        (when (< i0 L)
+          (let [i1 (min L (+ i0 block))
+                k0 (max 0 (- i0 reach))
+                k1 (min L (+ i1 reach))
+                rows (- i1 i0)
+                cols (- k1 k0)
+                qoff (+ (* h head-bytes) (* 4 i0 hd))
+                koff (+ (* h head-bytes) (* 4 k0 hd))]
+            (cblas-sgemm* RowMajor NoTrans Trans
+                          (long rows) (long cols) (long hd)
+                          (float scale) (at-offset qh qoff) (long hd)
+                          (at-offset kh koff) (long hd)
+                          0.0 (:p S) (long cols))
+            (masked-softmax* (:p S) (at-offset allowed (+ (* i0 L) k0)) (long L)
+                             (long rows) (long cols) (:p P))
+            (cblas-sgemm* RowMajor NoTrans NoTrans
+                          (long rows) (long hd) (long cols)
+                          1.0 (:p P) (long cols)
+                          (at-offset vh koff) (long hd)
+                          0.0 (at-offset ctx (* 4 (+ (* i0 d) (* h hd)))) (long d))
+            (recur i1)))))
+    ctx))
+
+(defn attention
+  "attention! into fresh buffers; see attention!."
   ([qh kh vh allowed H L hd scale] (attention qh kh vh allowed H L hd scale -1))
   ([qh kh vh allowed H L hd scale window]
-   (let [d (* H hd)
-         ctx (make [L d])
-         block (if (neg? window) L (max 1 (* 2 window)))
-         reach (if (neg? window) 0 window)
-         max-cols (min L (+ block (* 2 reach)))
-         S (make [(min L block) max-cols])
-         P (make [(min L block) max-cols])
-         head-bytes (* 4 L hd)]
-     (dotimes [h H]
-       (loop [i0 0]
-         (when (< i0 L)
-           (let [i1 (min L (+ i0 block))
-                 k0 (max 0 (- i0 reach))
-                 k1 (min L (+ i1 reach))
-                 rows (- i1 i0)
-                 cols (- k1 k0)
-                 qoff (+ (* h head-bytes) (* 4 i0 hd))
-                 koff (+ (* h head-bytes) (* 4 k0 hd))]
-             (cblas-sgemm* RowMajor NoTrans Trans
-                           (long rows) (long cols) (long hd)
-                           (float scale) (at-offset qh qoff) (long hd)
-                           (at-offset kh koff) (long hd)
-                           0.0 (:p S) (long cols))
-             (masked-softmax* (:p S) (at-offset allowed (+ (* i0 L) k0)) (long L)
-                              (long rows) (long cols) (:p P))
-             (cblas-sgemm* RowMajor NoTrans NoTrans
-                           (long rows) (long hd) (long cols)
-                           1.0 (:p P) (long cols)
-                           (at-offset vh koff) (long hd)
-                           0.0 (at-offset ctx (* 4 (+ (* i0 d) (* h hd)))) (long d))
-             (recur i1)))))
-     ctx)))
+   (attention! (make [L (* H hd)]) (make [L L]) (make [L L])
+               qh kh vh allowed H L hd scale window)))
 
 (defn add-qtype!
   "h += type_emb[qtype] per row (in place). h [n x d], bias [3 x d]."
@@ -317,14 +333,18 @@
     (softmax* (:p x) (long n) (long k) (:p out))
     out))
 
-(defn add-scaled
-  "out = a + alpha*b over an [n x d] block."
-  [a b alpha]
+(defn add-scaled!
+  "out = a + alpha*b over an [n x d] block; out may be a itself."
+  [out a b alpha]
   (let [n (long (first (:shape a)))
-        d (long (if (second (:shape a)) (second (:shape a)) 1))
-        out (make (:shape a))]
+        d (long (if (second (:shape a)) (second (:shape a)) 1))]
     (add-scaled* (:p a) (:p b) n d (float alpha) (:p out))
     out))
+
+(defn add-scaled
+  "out = a + alpha*b over an [n x d] block, into a new tensor."
+  [a b alpha]
+  (add-scaled! (make (:shape a)) a b alpha))
 
 (defn relu!
   "In-place ReLU."

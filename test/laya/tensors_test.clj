@@ -351,3 +351,37 @@
     (is (every? zero? (subvec got (* 5 cols))) "a row with no allowed key stays zero")
     (let [worst (reduce max (map (fn [g w] (/ (Math/abs (- (double g) w)) (+ 1e-9 w))) got want))]
       (is (< worst 2e-6) (str "worst relative error on a softmax weight " worst)))))
+
+;; --- workspace: one set of intermediates per forward, reused by every layer --
+
+(deftest workspace-layer-equals-allocating-layer
+  (let [layers (slurp-edn (str golden-dir "/layers.edn"))
+        manifest (edn/read-string (slurp (str data-dir "/manifest.edn")))
+        cfg (edn/read-string (slurp (str data-dir "/config.edn")))
+        w (laya.model/load-weights manifest data-dir)
+        L 74
+        ids0 (t/from-ints (map int (first (layers :ids))))
+        att0 (t/from-bytes (first (layers :att)) [L])
+        emb (t/embeddings (w "encoder.embeddings.tok_embeddings.weight")
+                          ids0 L 1024 (w "encoder.embeddings.norm.weight"))
+        before (t/to-floats emb)
+        full (t/allowed-mask att0 0 L -1)
+        slid (t/allowed-mask att0 0 L 64)
+        ws (laya.model/workspace cfg L)
+        plain (laya.model/encoder-layer! w cfg 0 emb att0 full slid)
+        via-ws (laya.model/encoder-layer! w cfg 0 emb att0 full slid ws)
+        same? (fn [a b] (< (reduce max (map #(Math/abs (- (double %1) (double %2))) (t/to-floats a) (t/to-floats b))) 1e-6))]
+    (is (same? plain via-ws) "a layer through the workspace matches the allocating layer")
+    (is (= before (t/to-floats emb)) "the input h is not written")
+    (testing "the residual stream alternates between the two workspace buffers"
+      (let [next-ws (laya.model/encoder-layer! w cfg 1 via-ws att0 full slid ws)
+            next-plain (laya.model/encoder-layer! w cfg 1 plain att0 full slid)]
+        (is (not= (jolt.ffi/address (t/ptr via-ws)) (jolt.ffi/address (t/ptr next-ws))) "layer i+1 does not overwrite its input")
+        (is (same? next-plain next-ws))
+        ;; layer 0 wrote into one residual buffer, layer 1 into the other; layer 2 reuses the first
+        (is (= (jolt.ffi/address (t/ptr via-ws))
+               (jolt.ffi/address (t/ptr (laya.model/encoder-layer! w cfg 2 next-ws att0 full slid ws)))))))
+    (testing "the head layer takes the same workspace"
+      (let [h0 (laya.model/head-layer! w cfg 0 plain full)
+            h0-ws (laya.model/head-layer! w cfg 0 plain full ws)]
+        (is (same? h0 h0-ws))))))

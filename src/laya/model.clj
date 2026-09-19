@@ -48,53 +48,82 @@
 
 (defn- wname [i k] (str "encoder.layers." i "." k))
 
+;; --- workspace -----------------------------------------------------------------
+
+(defn workspace
+  "Every intermediate a layer needs for L tokens, allocated once so the 28
+  encoder layers and the 2 head layers overwrite the same buffers instead
+  of each taking ~45 MB of fresh (zeroed, page-faulted) memory per layer,
+  which cost ~7 ms a layer at L=512, a fifth of the forward. Each kernel
+  writes every element of its output, so nothing needs zeroing between
+  uses. The residual stream alternates between :res0 and :res1 so a layer
+  never writes into the tensor it was given (`next-residual`)."
+  [cfg L]
+  (let [d (:hidden-size cfg)
+        H (:num-heads cfg)
+        hd (:head-dim cfg)
+        mid (:intermediate cfg)
+        ff (max (* 2 mid) (* 4 d))]   ; encoder Wi [L x 2mid], head linear1 [L x 4d]
+    {:res0 (t/make [L d]) :res1 (t/make [L d])
+     :norm (t/make [L d]) :qkv (t/make [L (* 3 d)])
+     :qh (t/make [(* H L) hd]) :kh (t/make [(* H L) hd]) :vh (t/make [(* H L) hd])
+     :ctx (t/make [L d]) :proj (t/make [L d]) :h2 (t/make [L d])
+     :ff (t/make [L ff]) :sw (t/make [L mid]) :mo (t/make [L d])
+     :S (t/make [L L]) :P (t/make [L L])}))
+
+(defn- next-residual
+  "The residual buffer that is not h: h came from the other one, or from
+  outside the workspace (the embeddings), in which case either will do."
+  [ws h]
+  (if (= (ffi/address (t/ptr h)) (ffi/address (t/ptr (:res0 ws)))) (:res1 ws) (:res0 ws)))
+
 (declare encoder-attention)
 
 (defn encoder-layer!
-  "Run encoder layer i on ONE batch row. h [L x d] in-place semantics:
-  returns a NEW tensor. allowed-full/allowed-sliding are [L x L] byte masks."
-  [w cfg i h att-row allowed-full allowed-sliding]
-  (let [L (first (t/shape h))
-        d (:hidden-size cfg)
-        H (:num-heads cfg)
-        hd (:head-dim cfg)
-        sliding? (= "sliding_attention" (nth (:layer-types cfg) i))
-        allowed (if sliding? allowed-sliding allowed-full)
-        attn-in (if (zero? i)
-                  h
-                  (t/layernorm h (w (wname i "attn_norm.weight")) (:norm-eps cfg)))
-        ctx (encoder-attention w cfg i attn-in allowed L)
-        attn-out (t/mmul ctx (w (wname i "attn.Wo.weight")))
-        h2 (t/add-scaled h attn-out 1.0)
-        mlp-in (t/layernorm h2 (w (wname i "mlp_norm.weight")) (:norm-eps cfg))
-        wi (t/mmul mlp-in (w (wname i "mlp.Wi.weight")))
-        mid (:intermediate cfg)
-        sw (t/swiglu wi mid)
-        mo (t/mmul sw (w (wname i "mlp.Wo.weight")))]
-    (t/add-scaled h2 mo 1.0)))
+  "Run encoder layer i on ONE batch row. h [L x d] is read, not written:
+  the result is a new tensor, or with a workspace the residual buffer that
+  is not h. allowed-full/allowed-sliding are [L x L] byte masks."
+  ([w cfg i h att-row allowed-full allowed-sliding]
+   (encoder-layer! w cfg i h att-row allowed-full allowed-sliding
+                   (workspace cfg (first (t/shape h)))))
+  ([w cfg i h att-row allowed-full allowed-sliding ws]
+   (let [L (first (t/shape h))
+         sliding? (= "sliding_attention" (nth (:layer-types cfg) i))
+         allowed (if sliding? allowed-sliding allowed-full)
+         attn-in (if (zero? i)
+                   h
+                   (t/layernorm! (:norm ws) h (w (wname i "attn_norm.weight")) (:norm-eps cfg)))
+         ctx (encoder-attention w cfg i attn-in allowed L ws)
+         attn-out (t/mmul! (:proj ws) ctx (w (wname i "attn.Wo.weight")))
+         h2 (t/add-scaled! (:h2 ws) h attn-out 1.0)
+         mlp-in (t/layernorm! (:norm ws) h2 (w (wname i "mlp_norm.weight")) (:norm-eps cfg))
+         mid (:intermediate cfg)
+         wi (t/mmul! (t/reshape (:ff ws) [L (* 2 mid)]) mlp-in (w (wname i "mlp.Wi.weight")))
+         sw (t/swiglu! (:sw ws) wi mid)
+         mo (t/mmul! (:mo ws) sw (w (wname i "mlp.Wo.weight")))]
+     (t/add-scaled! (next-residual ws h) h2 mo 1.0))))
 
 (defn encoder-attention
-  "qkv-split, rope, masked attention (banded on sliding layers), Wo. One
-  batch row, [L x d] in and out."
-  [w cfg i attn-in allowed L]
+  "qkv-split, rope, masked attention (banded on sliding layers). One batch
+  row, [L x d] in, the token-major context [L x d] out (the workspace's :ctx)."
+  [w cfg i attn-in allowed L ws]
   (let [H (:num-heads cfg)
         hd (:head-dim cfg)
         window (if (= "sliding_attention" (nth (:layer-types cfg) i)) (:window cfg) -1)
-        qkv (t/mmul attn-in (w (wname i "attn.Wqkv.weight")))
-        qh (t/make [(* H L) hd])
-        kh (t/make [(* H L) hd])
-        vh (t/make [(* H L) hd])
+        qkv (t/mmul! (:qkv ws) attn-in (w (wname i "attn.Wqkv.weight")))
+        {:keys [qh kh vh]} ws
         _ (split-qkv* (t/ptr qkv) (long L) (long H) (long hd)
                       (t/ptr qh) (t/ptr kh) (t/ptr vh))
         [cos-t sin-t] (rope-tables-for cfg i L)
         _ (t/rope-apply! qh cos-t sin-t H L hd)
         _ (t/rope-apply! kh cos-t sin-t H L hd)]
-    (t/attention qh kh vh allowed H L hd (/ 1.0 (Math/sqrt hd)) window)))
+    (t/attention! (:ctx ws) (:S ws) (:P ws) qh kh vh allowed H L hd (/ 1.0 (Math/sqrt hd)) window)))
 
 (defn encode-row
   "Full encoder for one batch row: embeddings, 28 layers, final norm.
-  ids [L] token ids, att-row [L] bytes 1=present."
-  [w cfg ids-tensor att-row]
+  ids [L] token ids, att-row [L] bytes 1=present. The workspace is shared
+  with the head layers that follow."
+  [w cfg ids-tensor att-row ws]
   (let [L (t/size att-row)
         d (:hidden-size cfg)
         emb (t/embeddings (w "encoder.embeddings.tok_embeddings.weight")
@@ -102,10 +131,11 @@
                           (w "encoder.embeddings.norm.weight"))
         full (t/allowed-mask att-row 0 L -1)
         sliding (t/allowed-mask att-row 0 L (:window cfg))
-        h (reduce (fn [h i] (encoder-layer! w cfg i h att-row full sliding))
+        h (reduce (fn [h i] (encoder-layer! w cfg i h att-row full sliding ws))
                   emb
                   (range (:num-layers cfg)))]
-    (t/layernorm h (w "encoder.final_norm.weight") (:norm-eps cfg))))
+    ;; into the residual buffer h did not come from: the head reads it next
+    (t/layernorm! (next-residual ws h) h (w "encoder.final_norm.weight") (:norm-eps cfg))))
 
 ;; --- head ---------------------------------------------------------------------
 
@@ -118,48 +148,49 @@
 
 (defn head-attention
   "torch MultiheadAttention (in_proj/out_proj, biased) with key-padding mask.
-  x [L x d] -> [L x d]. Same math as the encoder block but biased and
-  full-mask-only."
-  [w prefix x allowed L cfg]
+  x [L x d] -> [L x d] (the workspace's :proj). Same math as the encoder
+  block but biased and full-mask-only."
+  [w prefix x allowed L cfg ws]
   (let [d (:hidden-size cfg)
         H (:num-heads cfg)
         hd (:head-dim cfg)
-        qkv (t/mmul x (w (str prefix ".self_attn.in_proj_weight")))
+        qkv (t/mmul! (:qkv ws) x (w (str prefix ".self_attn.in_proj_weight")))
         _ (add-bias! (t/ptr qkv) (t/ptr (w (str prefix ".self_attn.in_proj_bias")))
                      (long L) (long (* 3 d)))
-        qh (t/make [(* H L) hd])
-        kh (t/make [(* H L) hd])
-        vh (t/make [(* H L) hd])
+        {:keys [qh kh vh]} ws
         _ (split-qkv* (t/ptr qkv) (long L) (long H) (long hd)
                       (t/ptr qh) (t/ptr kh) (t/ptr vh))
         ;; no rope in the head; straight scores
-        ctx (t/attention qh kh vh allowed H L hd (/ 1.0 (Math/sqrt hd)))
-        out (t/mmul ctx (w (str prefix ".self_attn.out_proj.weight")))]
+        ctx (t/attention! (:ctx ws) (:S ws) (:P ws) qh kh vh allowed H L hd (/ 1.0 (Math/sqrt hd)) -1)
+        out (t/mmul! (:proj ws) ctx (w (str prefix ".self_attn.out_proj.weight")))]
     (add-bias! (t/ptr out) (t/ptr (w (str prefix ".self_attn.out_proj.bias")))
                (long L) (long d))
     out))
 
 (defn head-layer!
   "One torch TransformerEncoderLayer, norm_first=true, ReLU FF, biased LN.
-  x [L x d], allowed [L x L] padding mask."
-  [w cfg li x allowed]
-  (let [L (first (t/shape x))
-        d (:hidden-size cfg)
-        prefix (str "head.layers." li)
-        n1 (t/layernorm x (w (str prefix ".norm1.weight"))
-                        (w (str prefix ".norm1.bias")) 1e-5)
-        attn (head-attention w prefix n1 allowed L cfg)
-        x2 (t/add-scaled x attn 1.0)
-        n2 (t/layernorm x2 (w (str prefix ".norm2.weight"))
-                        (w (str prefix ".norm2.bias")) 1e-5)
-        l1 (t/mmul n2 (w (str prefix ".linear1.weight")))
-        _ (add-bias! (t/ptr l1) (t/ptr (w (str prefix ".linear1.bias")))
-                     (long L) (long (* 4 d)))
-        _ (t/relu! l1)
-        l2 (t/mmul l1 (w (str prefix ".linear2.weight")))
-        _ (add-bias! (t/ptr l2) (t/ptr (w (str prefix ".linear2.bias")))
-                     (long L) (long d))]
-    (t/add-scaled x2 l2 1.0)))
+  x [L x d], allowed [L x L] padding mask. x is read, not written, as in
+  encoder-layer!."
+  ([w cfg li x allowed]
+   (head-layer! w cfg li x allowed (workspace cfg (first (t/shape x)))))
+  ([w cfg li x allowed ws]
+   (let [L (first (t/shape x))
+         d (:hidden-size cfg)
+         prefix (str "head.layers." li)
+         n1 (t/layernorm! (:norm ws) x (w (str prefix ".norm1.weight"))
+                          (w (str prefix ".norm1.bias")) 1e-5)
+         attn (head-attention w prefix n1 allowed L cfg ws)
+         x2 (t/add-scaled! (:h2 ws) x attn 1.0)
+         n2 (t/layernorm! (:norm ws) x2 (w (str prefix ".norm2.weight"))
+                          (w (str prefix ".norm2.bias")) 1e-5)
+         l1 (t/mmul! (t/reshape (:ff ws) [L (* 4 d)]) n2 (w (str prefix ".linear1.weight")))
+         _ (add-bias! (t/ptr l1) (t/ptr (w (str prefix ".linear1.bias")))
+                      (long L) (long (* 4 d)))
+         _ (t/relu! l1)
+         l2 (t/mmul! (:mo ws) l1 (w (str prefix ".linear2.weight")))
+         _ (add-bias! (t/ptr l2) (t/ptr (w (str prefix ".linear2.bias")))
+                      (long L) (long d))]
+     (t/add-scaled! (next-residual ws x) x2 l2 1.0))))
 
 (defn scorer
   "LN(bias) -> Linear+GELU -> Linear(+bias), on [n x d] marker rows.
@@ -211,12 +242,13 @@
     (binding [t/*arena* arena]
       (let [d (:hidden-size cfg)
             L (count ids-row)
+            ws (workspace cfg L)
             att-t (t/from-bytes att-row)
-            h (encode-row w cfg (t/from-ints ids-row) att-t)
+            h (encode-row w cfg (t/from-ints ids-row) att-t ws)
             _ (t/add-qtype! h (w "type_emb.weight")
                             (t/from-ints (vec (repeat L qtype))) L d)
             allowed (t/allowed-mask att-t 0 L -1)
-            h2 (reduce (fn [hh li] (head-layer! w cfg li hh allowed))
+            h2 (reduce (fn [hh li] (head-layer! w cfg li hh allowed ws))
                        h (range (:head-layers cfg)))
             kmax (count marker-pos)
             kpos (mapv #(max 0 (long %)) marker-pos)
