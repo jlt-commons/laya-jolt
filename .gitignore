@@ -20,3 +20,4 @@ lev-server
 .dolt/
 *.db
 .beads-credential-key
+bench/data/triad120.jsonl

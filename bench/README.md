@@ -62,6 +62,29 @@ answers came with a probability of 0.9 or more, so its `confidence` says
 nothing. It needs oMLX and bun on Apple Silicon and a 16.6 GB model; it
 was slower than the 2.5B thinker in the lev binary and four points behind it.
 
+## In-distribution: AG News, BoolQ, SST-5
+
+The trio localjev's bake-off uses, 40 balanced cases each
+(`bench/triad120.py` builds the set from the public datasets; `jolt -M
+bench/triad.clj <model> [thinking]` runs it). Routing-style traffic, the
+kind the encoder's presets exist for:
+
+| model | AG News | BoolQ | SST-5 (acc / MAE) | all | ms per question |
+|---|---|---|---|---|---|
+| lev encoder `english` | **97.5%** | 72.5% | 27.5% / 1.08 | **65.8%** | **125** (CPU) |
+| lev thinker, thinking off | 82.5% | 70.0% | 27.5% / 1.25 | 60.0% | 152 (Metal) |
+| lev thinker, thinking (greedy) | 85.0% | **90.0%** | **37.5% / 0.80** | **70.8%** | 3,001 (Metal) |
+
+Localjev's own numbers on the same three tasks (different samples, M5
+Max): Gemma 4 26B-A4B 75.0% macro at 0.68 s, DiffusionGemma 26B-A4B
+74.2% at 1.2 s, with a 2,048-word distraction dropping everything.
+
+The encoder is the fast path: it beats the 2.5B model answering at once on
+the routing task by 15 points, at 125 ms on a CPU against 150 ms on a GPU
+(~560 ms on a CPU), one forward for a whole workflow instead of one prompt
+per question, with calibrated confidence. The thinker's thinking earns
+its seconds on the reading-comprehension and reasoning cases.
+
 What the numbers say:
 
 - The gap to a hosted generative decision API on hard cases is the
