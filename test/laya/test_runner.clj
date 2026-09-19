@@ -7,7 +7,10 @@
     laya.tokenizer-test
     laya.sequence-test
     laya.json-test
-    laya.email-test
+    workflows.email-test
+    laya.config-test
+    laya.workflows-test
+    laya.run-test
     laya.prepare-test
     laya.agent-test
     laya.server-test])

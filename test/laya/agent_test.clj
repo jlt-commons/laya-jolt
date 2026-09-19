@@ -11,9 +11,13 @@
             [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]
             [laya.agent :as ag]
-            [laya.email :as email]
             [laya.sequence :as seq]
-            [laya.test-util :as tu :refer [golden-dir data-dir]]))
+            [laya.test-util :as tu :refer [golden-dir data-dir]]
+            [laya.workflows :as wf]))
+
+;; the bundled email workflow is a file, not a classpath namespace
+(wf/load-workflow "workflows/email.clj")
+(alias 'email 'workflows.email)
 
 (def agent (delay (ag/load-agent data-dir)))
 

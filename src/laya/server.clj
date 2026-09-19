@@ -27,6 +27,7 @@
             [laya.agent :as ag]
             [laya.json :as json]
             [laya.sequence :as seq]
+            [laya.config :as cfg]
             [laya.tokenizer :as tk]
             [ring-chez.adapter :as adapter])
   (:gen-class))
@@ -181,41 +182,30 @@
      ["tokenizer reproduces golden/tok.edn" tok-ok nil]
      ["NFC expansion path" nfc-ok nil]]))
 
-(defn- parse-args
-  "--flag value pairs and bare --flags: {\"--port\" \"8080\" \"--self-test\" true}."
-  [args]
-  (loop [args args out {}]
-    (if (empty? args)
-      out
-      (let [[k v & more] args]
-        (if (and v (not (str/starts-with? v "--")))
-          (recur more (assoc out k v))
-          (recur (rest args) (assoc out k true)))))))
-
-(defn- arg [opts flag env default]
-  (let [v (get opts flag)]
-    (or (when (string? v) v) (System/getenv env) default)))
-
 (defn -main
   "jolt -M:serve [--data DIR] [--port N] [--host ADDR] [--api-key KEY]
-   Environment fallbacks: LAYA_DATA, PORT, LAYA_HOST, LAYA_API_KEY.
+   Each falls back to an environment variable (LAYA_DATA, PORT, LAYA_HOST,
+   LAYA_API_KEY), then to ~/.config/laya/config.edn (:data :port :host
+   :api-key), then to a default (laya.config).
    --self-test [--golden DIR]: load, verify against golden/, exit 0 or 1."
   [& args]
-  (let [opts (parse-args args)
-        data-dir (arg opts "--data" "LAYA_DATA" "data")
+  (let [opts (cfg/parse-args args)
+        ctx (cfg/context opts)
+        arg (fn [flag env key default] (cfg/setting ctx flag env key default))
+        data-dir (arg "--data" "LAYA_DATA" :data "data")
         t0 (System/nanoTime)
         _ (binding [*out* *err*] (println "laya: loading" data-dir "..."))
         agent (ag/load-agent data-dir)
         _ (binding [*out* *err*]
             (println (format "laya: %d tensors loaded in %.1fs" (count (:w agent)) (/ (- (System/nanoTime) t0) 1e9))))]
     (if (get opts "--self-test")
-      (let [results (self-test agent (arg opts "--golden" "LAYA_GOLDEN" "golden"))]
+      (let [results (self-test agent (arg "--golden" "LAYA_GOLDEN" :golden "golden"))]
         (doseq [[name ok? detail] results]
           (println (if ok? "ok  " "FAIL") name (or detail "")))
         (System/exit (if (every? second results) 0 1)))
-      (let [port (Long/parseLong (str (arg opts "--port" "PORT" "8080")))
-            host (arg opts "--host" "LAYA_HOST" "127.0.0.1")
-            api-key (arg opts "--api-key" "LAYA_API_KEY" nil)
+      (let [port (Long/parseLong (str (arg "--port" "PORT" :port "8080")))
+            host (arg "--host" "LAYA_HOST" :host "127.0.0.1")
+            api-key (arg "--api-key" "LAYA_API_KEY" :api-key nil)
             server (start agent {:port port :host host :api-key api-key})]
         (binding [*out* *err*]
           (println (format "laya: listening on http://%s:%d (auth %s)"

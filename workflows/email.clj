@@ -1,6 +1,12 @@
-(ns laya.email
-  "Email helpers, mirroring laya 0.3.0 email.py (+ presets.email_questions): clean raw emails into a compact
-  state and a ready-made set of email questions.
+(ns workflows.email
+  "Email triage workflow, mirroring laya 0.3.0 email.py and
+  presets.email_questions: clean raw emails into a compact state and answer
+  a ready-made set of email questions.
+
+  As a workflow (laya.workflows): `questions` is email-questions, `state`
+  takes {\"subject\" \"body\" \"from\"} (string keys, as the HTTP API
+  receives them) and runs email-state on it. Options: {\"categories\"
+  {key description}} for your own routing labels.
 
   Jev-style models lose accuracy on long, noisy state, and the model reads
   at most max_len (512) tokens, so strip quoted replies, signatures and
@@ -230,3 +236,22 @@
                                        "blocking issue or hard deadline"])
       "needs_reply" (array-map "type" "noul"
                                "instructions" "Does the sender expect a reply?")))))
+
+;; --- the workflow contract -------------------------------------------------
+
+(defn questions
+  "Email triage: which team, spam, phishing, urgency, needs a reply.
+  Options: {\"categories\" {key description}} replaces the default teams."
+  ([] (email-questions))
+  ([opts] (email-questions (get opts "categories"))))
+
+(defn state
+  "{\"subject\" .. \"body\" .. \"from\" ..} -> email-state. A plain string is
+  taken as the body."
+  [input]
+  (if (map? input)
+    (email-state (get input "subject") (get input "body")
+                 :sender (get input "from")
+                 :clean (get input "clean" true)
+                 :extra (dissoc input "subject" "body" "from" "clean"))
+    (email-state nil (str input))))

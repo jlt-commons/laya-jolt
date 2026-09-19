@@ -53,14 +53,15 @@ jobs:
       - name: Package
         # Name from the REF, not the event: a workflow_dispatch on a tag is still
         # that tag's release. Only an untagged build gets the bare name. golden/
-        # rides along so a user can run --self-test against their own data/.
+        # and the bundled workflows/ ride along: --self-test against your own
+        # data/, and the email/demo workflows for the server.
         run: |
           case "${GITHUB_REF}" in
             refs/tags/*) name="laya-server-${GITHUB_REF_NAME}-${{ matrix.target }}" ;;
             *)           name="laya-server-${{ matrix.target }}" ;;
           esac
           mkdir -p "$name"
-          cp -r laya-server README.md LICENSE golden "$name/"
+          cp -r laya-server README.md LICENSE golden workflows "$name/"
           tar czf "${name}.tar.gz" "$name"
           echo "PKG=${name}.tar.gz" >> "$GITHUB_ENV"
 

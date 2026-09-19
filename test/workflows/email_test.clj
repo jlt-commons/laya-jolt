@@ -1,11 +1,15 @@
-(ns laya.email-test
+(ns workflows.email-test
   "laya email.py parity. golden/email.edn holds clean_email_body in/out
   pairs and json.dumps of email_state / email_questions from the Python
   module, so the port is compared byte for byte."
   (:require [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]
-            [laya.email :as email]
+            [laya.workflows :as wf]
             [laya.sequence :as seq]))
+
+;; the bundled email workflow is a file, not a classpath namespace
+(wf/load-workflow "workflows/email.clj")
+(alias 'email 'workflows.email)
 
 (def golden-dir
   (or (System/getenv "LAYA_GOLDEN") "golden"))

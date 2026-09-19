@@ -14,6 +14,7 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [jolt.ffi :as ffi]
+            [laya.config :as cfg]
             [laya.sequence :as seq])
   (:gen-class))
 
@@ -214,10 +215,13 @@
       (when (neg? crc) (throw (ex-info "cannot read file" {:path path})))
       [(ffi/read sz :int64 0) crc])))
 
-(defn -main [& args]
-  (let [opts (apply hash-map args)
-        laya-home (or (get opts "--laya") (System/getenv "LAYA_HOME") "../laya")
-        out (or (get opts "--out") "data")]
+(defn -main
+  "jolt -M:prepare [--laya DIR] [--out DIR]. Falls back to LAYA_HOME / LAYA_DATA,
+  then config.edn :laya-home / :data, then ../laya and data."
+  [& args]
+  (let [ctx (cfg/context (cfg/parse-args args))
+        laya-home (cfg/setting ctx "--laya" "LAYA_HOME" :laya-home "../laya")
+        out (cfg/setting ctx "--out" "LAYA_DATA" :data "data")]
     (try (convert laya-home out)
          (catch Exception e
            (if (= :checkpoint-missing (:type (ex-data e)))

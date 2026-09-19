@@ -48,20 +48,20 @@ so.
 
 ```
 jolt kernels             # compile native/laya_kernels.c
-jolt prepare             # ../laya checkpoint -> data/   (LAYA_HOME to point elsewhere)
+jolt prepare             # ../laya checkpoint -> data/
 jolt -M:test             # parity suites vs golden/
-jolt -M:run              # README quickstart demo
+jolt -M:run demo         # README quickstart through the workflow runner
 jolt -M:serve            # HTTP API on http://127.0.0.1:8080
 jolt binary              # standalone ./laya-server, self-tested against golden/
 ```
 
 `jolt kernels` shells out to `cc`. `jolt prepare` needs only the checkpoint
-(`LAYA_HOME`, default `../laya`) and the kernel library; it runs in a few
-seconds. No Python is involved anywhere; `golden/` holds the traces dumped
-from the torch CPU oracle and is checked in.
+and the kernel library; it runs in a few seconds. No Python is involved
+anywhere; `golden/` holds the traces dumped from the torch CPU oracle and is
+checked in.
 
-`jolt -M:run` prints the quickstart answer JSON. It should be identical to the
-`:system-one` value in `golden/readme.edn`.
+`jolt -M:run demo` prints the quickstart answer JSON. It should be identical
+to the `:system-one` value in `golden/readme.edn`.
 
 Answers come back as ordered maps with string keys, in the shape of the
 Python dicts. Because option order and question order are part of the model
@@ -69,12 +69,87 @@ input, pass `:criteria` and the questions map as ordered maps (`array-map`,
 or a literal with at most 8 entries); a hash-map would reorder them.
 
 ```clojure
-(require '[laya.agent :as ag] '[laya.email :as email])
+(require '[laya.agent :as ag] '[laya.workflows :as wf])
 (def agent (ag/load-agent "data"))
+(def email (wf/load-workflow "workflows/email.clj"))          ; or (wf/load-workflows dirs)
 (ag/system-one agent
-               (email/email-state "Duplicate billing" raw-body :sender "customer@acme.com")
-               (email/email-questions))
+               (wf/state email {"subject" "Duplicate billing" "body" raw-body "from" "customer@acme.com"})
+               (wf/questions email))
 ```
+
+## Configuration: `~/.config/laya`
+
+Every entry point (`jolt prepare`, `jolt -M:run`, `jolt -M:serve`, the
+binary) resolves its settings the same way: **CLI flag > environment
+variable > `config.edn` > default**. `config.edn` lives in
+`$LAYA_CONFIG_DIR`, else `$XDG_CONFIG_HOME/laya`, else `~/.config/laya`:
+
+```clojure
+{:data "/Users/me/models/laya-data"      ; prepared model dir: what jolt prepare writes and everything else loads
+ :laya-home "/Users/me/models/laya"      ; the Hub checkpoint jolt prepare reads
+ :workflow-dirs ["/Users/me/src/decisions/workflows"]   ; extra workflow directories
+ :port 8080 :host "127.0.0.1" :api-key "s3cret"}       ; server defaults
+```
+
+| setting | flag | environment | `config.edn` | default |
+|---|---|---|---|---|
+| prepared model | `--data DIR` | `LAYA_DATA` | `:data` | `data` |
+| checkpoint (prepare) | `--laya DIR` | `LAYA_HOME` | `:laya-home` | `../laya` |
+| workflow dirs | `--workflows DIR[:DIR]` | `LAYA_WORKFLOWS` | `:workflow-dirs` (adds) | see below |
+| server | `--port` `--host` `--api-key` | `PORT` `LAYA_HOST` `LAYA_API_KEY` | `:port` `:host` `:api-key` | `8080` `127.0.0.1` none |
+
+`--workflows` and `LAYA_WORKFLOWS` are the exception to "adds": they name
+exactly the directories to scan, replacing the defaults, so a test or a
+one-off run is isolated from whatever is in `~/.config/laya`.
+
+## Workflows
+
+A workflow packages a use case: how to turn raw input into the model's
+state, and which typed questions to ask. They are ordinary Clojure files,
+not part of `src/`: the bundled ones live in [`workflows/`](workflows) and
+yours go in `~/.config/laya/workflows/` (or any directory listed in
+`config.edn :workflow-dirs`). Directories load in that order and a later
+one wins on a name clash, so a `~/.config/laya/workflows/email.clj`
+replaces the bundled `email`.
+
+A file `<dir>/<name>.clj` defines the namespace `workflows.<name>`
+(underscores in the file name become dashes) with:
+
+```clojure
+(ns workflows.refund-risk
+  (:require [clojure.string :as str]))
+
+(defn questions
+  "Refund risk on a support ticket."                 ; the docstring is the description
+  ([] (questions {}))
+  ([opts]                                            ; optional 1-arity: the caller's options
+   {"wants_refund" {"type" "noul" "instructions" "Does the customer ask for money back?"}
+    "tone" {"type" "score" "instructions" "How angry is the ticket?"
+            "criteria" ["calm" "annoyed" "furious"]}
+    "team" {"type" "choice" "instructions" "Who should own this?"
+            "criteria" (get opts "teams" {"billing" "money" "support" "everything else"})}}))
+
+(defn state                                          ; optional; without it the input is the state
+  [input]
+  {"ticket" (str/trim (get input "text" ""))})
+```
+
+`questions` is required; `state` is optional. Question maps use string keys
+(the shape the HTTP API receives); an `array-map` keeps option order, which is
+model input. Run it:
+
+```
+jolt -M:run --list                                          # what is loaded, from where
+jolt -M:run refund-risk '{"text": "Charged twice, want my money back"}'
+jolt -M:run refund-risk @ticket.json --options '{"teams": {"billing": "money", "fraud": "chargebacks"}}'
+LAYA_WORKFLOWS=./my-workflows jolt -M:run refund-risk @ticket.json   # only that directory
+```
+
+Bundled: `demo` (the quickstart; its answer is pinned by `golden/readme.edn`)
+and `email` (the port of `laya`'s `email_state` / `email_questions`: cleans
+quoted history, signatures and disclaimers out of `{"subject" "body" "from"}`
+and asks category, spam, phishing, urgency, needs-reply; option
+`{"categories" {key description}}` swaps the teams).
 
 ## HTTP API
 
@@ -112,9 +187,9 @@ Add this repo as a `:git/url` dep, run `jolt kernels` / `jolt prepare` for
 the native library and `data/`, then:
 
 ```clojure
-(require '[laya.agent :as ag] '[laya.server :as server])
-(def agent (ag/load-agent "data"))                     ; ~1.7 GB of f32 weights, once
-(ag/system-one agent state questions)                  ; the Python API, as data
+(require '[laya.agent :as ag] '[laya.server :as server] '[laya.config :as cfg])
+(def agent (ag/load-agent (cfg/setting (cfg/context {}) "--data" "LAYA_DATA" :data "data")))
+(ag/system-one agent state questions)                  ; the Python API, as data (~1.7 GB f32, loaded once)
 (def h (server/handler agent {:api-key nil}))          ; a ring handler to mount anywhere
 (def s (server/start agent {:port 8080}))              ; or run it on ring-chez-adapter
 (server/stop s)
@@ -164,8 +239,8 @@ suffixes in `deps.edn` if your distro's `libicuuc.so` version is not listed.
 
 ## Status
 
-Encoder, head, tokenizer, sequence, agent, email helpers and the checkpoint
-conversion all match their golden traces. `system-one` on the quickstart case
+Encoder, head, tokenizer, sequence, agent, the email workflow and the
+checkpoint conversion all match their golden traces. `system-one` on the quickstart case
 is byte-identical to the Python output.
 
 Per-forward temporaries live in an ffi arena that closes with the call, so a
