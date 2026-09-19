@@ -1,7 +1,10 @@
 (ns laya.test-util
   "Shared helpers for the parity suites."
-  (:require [clojure.edn :as edn]
+  (:require [clojure.data.json :as json]
+            [clojure.edn :as edn]
+            [clojure.test :refer [is]]
             [laya.agent :as ag]
+            [laya.tensors]
             [laya.sequence :as seq]))
 
 (def golden-dir
@@ -36,3 +39,32 @@
     (and (sequential? a) (sequential? b)) (and (= (count a) (count b))
                                                (every? true? (map #(approx= tol %1 %2) a b)))
     :else (= a b)))
+
+(def accelerate?
+  "Apple's Accelerate is the BLAS the goldens are byte-identical under. On
+  x86 OpenBLAS picks kernels per CPU model, and the ubuntu CI runners are
+  not all the same machine: the same weights gave a 4-decimal probability
+  of 0.3142 on one and 0.3143 on another, a value sitting on the rounding
+  boundary. So answers are exact on mac and within one unit in the last
+  place elsewhere."
+  (some? (re-find #"^Mac" (System/getProperty "os.name"))))
+
+(defn answers-match
+  "Assert a system-one JSON string against its golden: parsed and within
+  1e-4 everywhere, byte-for-byte under Accelerate."
+  [want got & [msg]]
+  (is (approx= 1.0001e-4 (json/read-str want) (json/read-str got)) (or msg "answers within 1e-4"))
+  (when accelerate?
+    (is (= want got) (or msg "byte-identical under Accelerate"))))
+
+(defn relative-max-abs
+  "max |a-b| over the first n values, as a fraction of max |b|: the bound
+  the residual stream needs (outlier dims reach ~3e4, where an f32 ulp is
+  2e-3, and every sgemm summation order lands a few ulps apart)."
+  [a b n]
+  (let [pa (laya.tensors/ptr a) pb (laya.tensors/ptr b)]
+    (loop [i 0 diff 0.0 scale 0.0]
+      (if (= i n)
+        [(/ diff (max scale 1e-30)) diff scale]
+        (let [x (laya.tensors/get pa i) y (laya.tensors/get pb i)]
+          (recur (inc i) (max diff (Math/abs (- x y))) (max scale (Math/abs y))))))))

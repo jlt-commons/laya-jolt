@@ -72,10 +72,10 @@ runs:
       shell: bash
       run: jolt kernels
 
-    # 1.6 GB from the Hub: the english root and the typed-decisions subfolder
-    # (multilingual waits on its tokenizer port). The cache key is the
-    # revision, so a bump above refetches once and every OS shares the one
-    # entry (the files are the same bytes everywhere).
+    # 2.3 GB from the Hub: the english root plus the typed-decisions and
+    # multilingual subfolders. The cache key is the revision, so a bump above
+    # refetches once and every OS shares the one entry (the files are the
+    # same bytes everywhere).
     - name: Cache the Laya checkpoint
       id: checkpoint
       uses: actions/cache@v4
@@ -91,21 +91,24 @@ runs:
         # sha256 of each model.safetensors at that revision (its LFS blob id)
         SHA256_ENGLISH: 891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c
         SHA256_TYPED_DECISIONS: 4fa56de72383a9d3efa9cfa78955733c81b9fc8067a587ca4beb82c78107a24e
+        SHA256_MULTILINGUAL: 9d628fd971b700382ac6f65920a86f149777b2e748e0c955fb3b19695aa8f204
       run: |
         base="https://huggingface.co/convaiinnovations/laya/resolve/${REV}"
-        fetch() {  # fetch <subdir-or-empty> : the four files jolt prepare reads
+        fetch() {  # fetch <subdir-or-empty> : the five files jolt prepare reads
           local sub="$1" dir="$HOME/laya${1:+/$1}"
           mkdir -p "$dir/tokenizer" "$dir/encoder"
-          for f in model.safetensors tokenizer/tokenizer.json encoder/config.json rl_agent_config.json; do
+          for f in model.safetensors tokenizer/tokenizer.json tokenizer/tokenizer_config.json encoder/config.json rl_agent_config.json; do
             curl -fsSL --retry 3 -o "$dir/$f" "$base/${sub:+$sub/}$f"
           done
         }
         fetch ""
         fetch typed-decisions
+        fetch multilingual
         echo "$SHA256_ENGLISH  $HOME/laya/model.safetensors" | shasum -a 256 -c -
         echo "$SHA256_TYPED_DECISIONS  $HOME/laya/typed-decisions/model.safetensors" | shasum -a 256 -c -
+        echo "$SHA256_MULTILINGUAL  $HOME/laya/multilingual/model.safetensors" | shasum -a 256 -c -
 
-    # every checkpoint under LAYA_HOME: data/ (english) and data/typed-decisions
+    # every checkpoint under LAYA_HOME: data/, data/typed-decisions, data/multilingual
     - name: Prepare data/
       shell: bash
       run: |

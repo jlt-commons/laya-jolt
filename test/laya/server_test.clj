@@ -36,10 +36,10 @@
     (is (= 200 (:status resp)))
     (is (= "application/json" (get-in resp [:headers "Content-Type"])))
     (testing "the body is json.dumps(Agent.system_one(...)) plus the routing decision"
-      (let [body (str/trim (:body resp))
-            want (:system-one (tu/read-golden "readme"))]
-        (is (str/starts-with? body (subs want 0 (dec (count want)))) "byte-identical up to the routing key")
-        (is (= "english" (get-in (json/read-str body) ["routing" "model"])))))))
+      (let [body (json/read-str (str/trim (:body resp)))]
+        (tu/answers-match (:system-one (tu/read-golden "readme")) (seq/json-str (dissoc body "routing")))
+        (is (= ["model" "answers" "usage" "routing"] (keys body)))
+        (is (= "english" (get-in body ["routing" "model"])))))))
 
 (deftest model-field-selects-the-checkpoint
   (let [h (srv/handler @agent {})
@@ -69,7 +69,8 @@
         (is (= ["body" "model"] (get-in b ["detail" 0 "loc"])))
         (is (str/includes? (get-in b ["detail" 0 "msg"]) "multilingual"))))
     (testing "a checkpoint that is not prepared is a 503, not a crash"
-      (let [[st b] (call h (req :post "/v1/systemone" :body (seq/json-str (assoc one-q "model" "multilingual"))))]
+      (let [h (srv/handler (router/preloaded @agent "english" {:models {"multilingual" "target/not-prepared"}}) {})
+            [st b] (call h (req :post "/v1/systemone" :body (seq/json-str (assoc one-q "model" "multilingual"))))]
         (is (= 503 st))
         (is (str/includes? (get b "detail") "multilingual"))))
     (testing "must be strings"
@@ -134,8 +135,7 @@
     (testing "demo needs no input at all"
       (let [[st b] (call h (req :post "/v1/workflows/demo" :body "{}"))]
         (is (= 200 st))
-        (is (= (json/read-str (:system-one (tu/read-golden "readme")))
-               (dissoc b "routing" "workflow" "state")))))
+        (tu/answers-match (:system-one (tu/read-golden "readme")) (seq/json-str (dissoc b "routing" "workflow" "state")))))
     (testing "model / lang / task route the workflow request too"
       (let [[st b] (call h (req :post "/v1/workflows/demo" :body (seq/json-str {"model" "english"})))]
         (is (= 200 st))
@@ -243,8 +243,7 @@
             denied (curl (str "-o /dev/null -w '%{http_code}' -X POST -d '{}' " base "/v1/systemone"))]
         (is (= {"status" "ok" "model" "laya-rl-agent" "loaded" ["english"] "workflows" []}
                (json/read-str (str/trim health))))
-        (is (= (json/read-str (:system-one (tu/read-golden "readme")))
-               (dissoc (json/read-str (str/trim answer)) "routing")))
+        (tu/answers-match (:system-one (tu/read-golden "readme")) (seq/json-str (dissoc (json/read-str (str/trim answer)) "routing")))
         (is (= "401" (str/trim denied))))
       (finally
         (srv/stop server)))))

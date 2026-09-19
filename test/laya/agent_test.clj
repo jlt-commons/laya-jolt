@@ -121,8 +121,8 @@
 
 (deftest system-one-matches-readme
   (let [out (ag/system-one @agent state questions)]
-    (testing "byte-for-byte equal to the checkpoint's own output"
-      (is (= (golden-system-one) (seq/json-str out))))
+    (testing "equal to the checkpoint's own output (byte-for-byte under Accelerate)"
+      (tu/answers-match (golden-system-one) (seq/json-str out)))
     (testing "typed answers"
       (let [a (get out "answers")]
         (is (= "billing" (get-in a ["department" "choice"])))

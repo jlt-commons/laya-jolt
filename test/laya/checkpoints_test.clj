@@ -17,10 +17,14 @@
             [laya.tokenizer :as tk]))
 
 (def checkpoints
-  "Every golden/<name>/ that exists; each needs data/<name>/ prepared."
-  (vec (for [n ["typed-decisions" "multilingual"]
-             :when (.exists (io/file tu/golden-dir n "cases.edn"))]
-         n)))
+  "Every golden/<name>/ that exists (each needs data/<name>/ prepared), or
+  the names in LAYA_CHECKPOINTS (comma-separated; empty means none), so CI
+  can test one checkpoint per process."
+  (let [wanted (some-> (System/getenv "LAYA_CHECKPOINTS") (clojure.string/split #",") set)]
+    (vec (for [n ["typed-decisions" "multilingual"]
+               :when (.exists (io/file tu/golden-dir n "cases.edn"))
+               :when (or (nil? wanted) (contains? wanted n))]
+           n))))
 
 (def agents
   (into {} (for [n checkpoints]
@@ -35,7 +39,8 @@
   @(get agents n))
 
 (deftest checkpoints-are-prepared
-  (is (seq checkpoints) "golden/typed-decisions must exist")
+  (when (nil? (System/getenv "LAYA_CHECKPOINTS"))
+    (is (= ["typed-decisions" "multilingual"] checkpoints) "both extra checkpoints have goldens"))
   (doseq [n checkpoints]
     (is (.exists (io/file tu/data-dir n "manifest.edn")) (str n " prepared"))))
 
@@ -93,10 +98,11 @@
         (is (= (:num-layers layers) (:num-layers cfg)))
         (is (< (mx emb (load :embeddings) (* L d)) 1e-4))
         (let [out (reduce (fn [h k] (laya.model/encoder-layer! w cfg k h att0 full slid)) emb (range (inc last)))
-              l0 (laya.model/encoder-layer! w cfg 0 emb att0 full slid)]
+              l0 (laya.model/encoder-layer! w cfg 0 emb att0 full slid)
+              [rel diff scale] (tu/relative-max-abs out (load (keyword (str "layer-" last))) (* L d))]
           (is (< (mx l0 (load :layer-0) (* L d)) 1e-4) "layer 0")
-          ;; same bound as tensors_test/last-layer-tol: outlier dims in the hundreds
-          (is (< (mx out (load (keyword (str "layer-" last))) (* L d)) 0.25) (str "layer " last)))))))
+          ;; same bound as tensors_test/last-layer-rel-tol
+          (is (< rel 5e-5) (format "layer %d: max-abs %.4g of a %.4g-scale stream (rel %.2e)" last diff scale rel)))))))
 
 (deftest answers-match-the-oracle
   (doseq [n checkpoints]
@@ -105,9 +111,9 @@
           cases (golden n "cases")
           rt (router/make-router {:models {n (str tu/data-dir "/" n)}
                                   :loader (fn [name _] (if (= name n) ag* (throw (ex-info "wrong checkpoint" {:name name}))))})]
-      (testing (str n ": the quickstart, byte for byte")
-        (is (= (:system-one readme)
-               (seq/json-str (ag/system-one ag* (:readme-state cases) (:readme-questions cases))))))
+      (testing (str n ": the quickstart (byte for byte under Accelerate)")
+        (tu/answers-match (:system-one readme)
+                          (seq/json-str (ag/system-one ag* (:readme-state cases) (:readme-questions cases)))))
       (testing (str n ": an invoice-processing case, routed explicitly")
         (let [out (router/predict rt (:typed-decisions-state readme) (:typed-decisions-questions readme) :model n)
               want (json/read-str (:typed-decisions readme))

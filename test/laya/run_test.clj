@@ -12,7 +12,7 @@
 (deftest demo-is-the-quickstart
   (testing "run demo prints the golden README answer"
     (let [out (run/run-workflow @agent ["workflows"] "demo" nil nil)]
-      (is (= (:system-one (tu/read-golden "readme")) (seq/json-str out))))))
+      (tu/answers-match (:system-one (tu/read-golden "readme")) (seq/json-str out)))))
 
 (deftest email-workflow-from-json-input
   (let [g (tu/read-golden "email_answers")

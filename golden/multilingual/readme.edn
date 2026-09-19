@@ -1,0 +1,33 @@
+{:input-ids {
+ "department" {:ids [2 6241 2872 235292 12236 9888 1412 6589 736 4801 235336 1 4 54972 235292 88220 235269 15598 235269 85869 4 9838 235292 30608 235269 142788 235269 134538 4 7108 235292 25063 235269 20078 235269 105404 4 1156 235292 4553 1354 1 19946 2273 1192 664 75078 235348 7310 235265 495 824 664 15029 1192 664 191398 488 2524 26272 1063 824 664 2168 1192 664 63869 113485 9907 169541 2100 142216 235265 60743 157098 965 3670 1600 199150 5715 79916 22164 235269 58488 638 216737 6254 1464 235270 1] :markers [12 20 28 36] :qtype 0}
+ "urgency" {:ids [2 7716 2872 235292 2250 34722 603 736 3853 235336 1 4 2403 235248 235276 235292 780 34722 4 2403 235248 235274 235292 4445 4 2403 235248 235284 235292 9523 30699 689 35578 4295 1 19946 2273 1192 664 75078 235348 7310 235265 495 824 664 15029 1192 664 191398 488 2524 26272 1063 824 664 2168 1192 664 63869 113485 9907 169541 2100 142216 235265 60743 157098 965 3670 1600 199150 5715 79916 22164 235269 58488 638 216737 6254 1464 235270 1] :markers [11 18 24] :qtype 1}
+ "churn_risk" {:ids [2 552 6311 2872 235292 11188 573 2425 60399 577 12459 689 8266 577 476 62420 235336 1 4 1566 235292 793 235269 573 6218 1721 780 3385 4 1382 235292 7778 235269 573 6218 12723 1 19946 2273 1192 664 75078 235348 7310 235265 495 824 664 15029 1192 664 191398 488 2524 26272 1063 824 664 2168 1192 664 63869 113485 9907 169541 2100 142216 235265 60743 157098 965 3670 1600 199150 5715 79916 22164 235269 58488 638 216737 6254 1464 235270 1] :markers [18 28] :qtype 2}
+ "is_phishing" {:ids [2 552 6311 2872 235292 2125 736 4801 476 118602 689 37853 8697 235336 1 4 1566 235292 793 235269 573 6218 1721 780 3385 4 1382 235292 7778 235269 573 6218 12723 1 19946 2273 1192 664 75078 235348 7310 235265 495 824 664 15029 1192 664 191398 488 2524 26272 1063 824 664 2168 1192 664 63869 113485 9907 169541 2100 142216 235265 60743 157098 965 3670 1600 199150 5715 79916 22164 235269 58488 638 216737 6254 1464 235270 1] :markers [15 25] :qtype 2}
+}
+ :sdpa-layer-0-stats [64.7841873 391.063286]
+ :sdpa-layer-1-stats [63.6290016 435.19069]
+ :sdpa-layer-2-stats [59.5581284 466.141215]
+ :sdpa-layer-3-stats [62.860981 500.296105]
+ :sdpa-layer-4-stats [60.420887 527.240414]
+ :sdpa-layer-5-stats [69.8018494 562.177796]
+ :sdpa-layer-6-stats [71.8148651 610.208655]
+ :sdpa-layer-7-stats [104.527069 675.223928]
+ :sdpa-layer-8-stats [131.741135 735.726008]
+ :sdpa-layer-9-stats [129.048538 769.653358]
+ :sdpa-layer-10-stats [134.015366 838.244277]
+ :sdpa-layer-11-stats [13534.1104 26452.3217]
+ :sdpa-layer-12-stats [13537.9326 28352.2773]
+ :sdpa-layer-13-stats [13533.3994 28361.88]
+ :sdpa-layer-14-stats [13532.1123 28361.1854]
+ :sdpa-layer-15-stats [13524.5615 28363.3646]
+ :sdpa-layer-16-stats [13513.0479 28354.411]
+ :sdpa-layer-17-stats [13512.3174 28364.218]
+ :sdpa-layer-18-stats [13493.6885 28481.6532]
+ :sdpa-layer-19-stats [13493.3018 28475.5848]
+ :sdpa-layer-20-stats [13488.7676 28476.0522]
+ :sdpa-layer-21-stats [13477.9102 28456.8867]
+ :state #laya/omap [["from" "kunde@example.de"] ["subject" "Doppelte Abbuchung"] ["body" "Mein Konto wurde zweimal belastet. Bitte erstatten Sie den Betrag bis Freitag zurück, sonst kündigen wir."]]
+ :system-one "{\"model\": \"laya-rl-agent\", \"answers\": {\"department\": {\"type\": \"choice\", \"choice\": \"billing\", \"probabilities\": {\"billing\": 0.9993, \"technical\": 0.0001, \"sales\": 0.0001, \"other\": 0.0006}, \"confidence\": 0.9953, \"action\": {\"act_probability\": 1.0}}, \"urgency\": {\"type\": \"score\", \"score\": 1.9021, \"legend\": {\"0\": \"not urgent\", \"1\": \"soon\", \"2\": \"critical deadline or blocking issue\"}, \"probabilities\": {\"0\": 0.003, \"1\": 0.0919, \"2\": 0.9051}, \"confidence\": 0.7024, \"action\": {\"act_probability\": 1.0}}, \"churn_risk\": {\"type\": \"noul\", \"noul\": 0.0156, \"confidence\": 0.9844, \"action\": {\"act_probability\": 1.0}}, \"is_phishing\": {\"type\": \"noul\", \"noul\": 0.3735, \"confidence\": 0.6265, \"action\": {\"act_probability\": 1.0}}}, \"usage\": {\"input_tokens\": 340, \"output_tokens\": 0}}"
+ :typed-decisions-state #laya/omap [["invoice_id" "INV-2024-0913"] ["vendor" "Northwind Traders"] ["amount" 12480.0] ["po_amount" 11900.0] ["po_number" "PO-7781"] ["notes" "Second copy of an invoice received on 2024-09-02; freight line added since."] ["due_in_days" 3]]
+ :typed-decisions-questions #laya/omap [["matches_order" #laya/omap [["type" "noul"] ["instructions" "Does the invoice match the purchase order?"]]] ["duplicate" #laya/omap [["type" "noul"] ["instructions" "Is this a duplicate of an invoice already received?"]]] ["discrepancy_severity" #laya/omap [["type" "score"] ["instructions" "How severe is the discrepancy between invoice and PO?"] ["criteria" ["none" "minor: within tolerance" "material: needs review" "severe: block payment"]]]] ["disposition" #laya/omap [["type" "choice"] ["instructions" "What should happen to this invoice?"] ["criteria" #laya/omap [["approve" "pay as-is"] ["hold" "hold for review"] ["reject" "reject and notify vendor"] ["escalate" "escalate to finance lead"]]]]] ["urgency" #laya/omap [["type" "score"] ["instructions" "How urgent is a decision?"] ["criteria" ["no time pressure" "this week" "today"]]]]]
+ :typed-decisions "{\"model\": \"laya-rl-agent\", \"answers\": {\"matches_order\": {\"type\": \"noul\", \"noul\": 0.3157, \"confidence\": 0.6843, \"action\": {\"act_probability\": 1.0}}, \"duplicate\": {\"type\": \"noul\", \"noul\": 0.1216, \"confidence\": 0.8784, \"action\": {\"act_probability\": 1.0}}, \"discrepancy_severity\": {\"type\": \"score\", \"score\": 1.2064, \"legend\": {\"0\": \"none\", \"1\": \"minor: within tolerance\", \"2\": \"material: needs review\", \"3\": \"severe: block payment\"}, \"probabilities\": {\"0\": 0.0239, \"1\": 0.8059, \"2\": 0.1101, \"3\": 0.0601}, \"confidence\": 0.513, \"action\": {\"act_probability\": 1.0}}, \"disposition\": {\"type\": \"choice\", \"choice\": \"reject\", \"probabilities\": {\"approve\": 0.0099, \"hold\": 0.0049, \"reject\": 0.98, \"escalate\": 0.0051}, \"confidence\": 0.9143, \"action\": {\"act_probability\": 1.0}}, \"urgency\": {\"type\": \"score\", \"score\": 1.0019, \"legend\": {\"0\": \"no time pressure\", \"1\": \"this week\", \"2\": \"today\"}, \"probabilities\": {\"0\": 0.0421, \"1\": 0.9139, \"2\": 0.044}, \"confidence\": 0.6786, \"action\": {\"act_probability\": 1.0}}}, \"usage\": {\"input_tokens\": 710, \"output_tokens\": 0}}"}

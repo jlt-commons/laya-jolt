@@ -1,13 +1,21 @@
 (ns laya.tokenizer
-  "GPT-2 byte-level BPE, faithful to the checkpoint's tokenizer.json:
-  NFC normalize (ICU unorm2 via FFI), GPT-2 pre-tokenization (hand-written
+  "The two tokenizers in the Laya bundle, faithful to their tokenizer.json:
+
+  :byte-level (english, typed-decisions) - GPT-2 byte-level BPE: NFC
+  normalize (ICU unorm2 via FFI), GPT-2 pre-tokenization (hand-written
   scanner with exact \\p{L}/\\p{N} classes via ICU u_charType, since the
   pattern needs lookahead that irregex lacks), byte-to-unicode mapping, and
   lowest-rank-first BPE merges.
 
-  Encoding parity is pinned by golden/tok.edn (input_ids from the real
-  transformers fast tokenizer on 26 tricky cases) and the scanner by the
-  ByteLevel pre-tokenizer boundaries in golden/cases.edn."
+  :sentencepiece (multilingual, the mmBERT/Gemma tokenizer) - added tokens
+  extracted first (leftmost-longest, `lstrip` swallowing whitespace), then
+  per segment: spaces to \u2581, a \u2581 prepended, split keeping \u2581
+  with the piece it starts, and BPE over each piece with UTF-8 byte
+  fallback (<0xNN>) and fused <unk>.
+
+  Encoding parity is pinned by golden/tok.edn and golden/multilingual/tok.edn
+  (input_ids from the real transformers fast tokenizers) and the scanner by
+  the ByteLevel pre-tokenizer boundaries in golden/cases.edn."
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
             [jolt.ffi :as ffi]))
@@ -216,21 +224,34 @@
               tok (subs s i end)]
           (recur end (conj rev tok)))))))
 
-(defrecord Tokenizer [vocab ranks specials added max-added])
+(defrecord Tokenizer [vocab ranks specials added max-added kind mask-token lstrip byte-fallback fuse-unk])
 
 (defn load
-  "Load data/tokenizer.edn -> Tokenizer."
+  "Load data/tokenizer.edn -> Tokenizer. :kind defaults to :byte-level (the
+  format-1 files jolt prepare writes for GPT-2 style tokenizers)."
   [path]
   (let [m (edn/read-string (slurp path))
         added (into {} (:added m))]
-    (->Tokenizer (:vocab m)
-                 (into {} (map-indexed (fn [i mg]
-                                         (let [[a b] (str/split mg #" ")]
-                                           [[a b] i])))
-                       (:merges m))
-                 (:specials m)
-                 added
-                 (reduce (fn [mx [k _]] (max mx (count k))) 0 added))))
+    (map->Tokenizer
+     {:vocab (:vocab m)
+      :ranks (into {} (map-indexed (fn [i mg]
+                                     (let [[a b] (str/split mg #" ")]
+                                       [[a b] i])))
+                   (:merges m))
+      :specials (:specials m)
+      :added added
+      :max-added (reduce (fn [mx [k _]] (max mx (count k))) 0 added)
+      :kind (or (:kind m) :byte-level)
+      :mask-token (or (:mask-token m) "[MASK]")
+      :lstrip (set (:lstrip m))
+      :byte-fallback (boolean (:byte-fallback m))
+      :fuse-unk (boolean (:fuse-unk m))})))
+
+(defn mask-token
+  "The mask token's text ([MASK] or <mask>): build-sequence blanks it out of
+  user text so it cannot inject a marker."
+  [tok]
+  (:mask-token tok))
 
 (defn- lowest-ranked-pair
   "[a b rank] of the adjacent pair with the lowest merge rank, or nil.
@@ -291,10 +312,7 @@
                          (get added (subs s i (+ i hit)))))
             (recur (inc i) start out)))))))
 
-(defn encode
-  "Text -> input_ids (no special tokens), matching
-  tok(text, add_special_tokens=False)['input_ids']."
-  [tok text]
+(defn- byte-level-encode [tok text]
   (let [s (nfc text)]
     (into []
           (mapcat (fn [seg]
@@ -306,6 +324,96 @@
                               (pre-tokenize seg))
                       [seg])))
           (added-segments s (:added tok) (:max-added tok)))))
+
+;; --- sentencepiece BPE (mmBERT / Gemma) -----------------------------------------
+
+(def ^:private lower-one-eighth-block "\u2581")
+
+(defn sp-segments
+  "Added-token extraction for the sentencepiece kind: like added-segments
+  (leftmost-longest over the raw text; HF matches these before any
+  normalization) but a token in `lstrip` also swallows the Unicode
+  whitespace before it, up to the previous match. Strings are gaps, longs
+  are ids."
+  [s added max-added lstrip]
+  (let [n (count s)
+        emit-gap (fn [out from to] (if (< from to) (conj out (subs s from to)) out))]
+    (loop [i 0 start 0 out []]
+      (if (>= i n)
+        (emit-gap out start n)
+        (let [lim (min max-added (- n i))
+              hit (loop [l lim]
+                    (when (pos? l)
+                      (let [sub (subs s i (+ i l))]
+                        (if (contains? added sub) l (recur (dec l))))))]
+          (if hit
+            (let [content (subs s i (+ i hit))
+                  from (if (contains? lstrip content)
+                         (loop [k i] (if (and (> k start) (space? (nth s (dec k)))) (recur (dec k)) k))
+                         i)]
+              (recur (+ i hit) (+ i hit)
+                     (conj (emit-gap out start from) (get added content))))
+            (recur (inc i) start out)))))))
+
+(defn metaspace-pieces
+  "One gap -> BPE words, as tokenizers' Metaspace(prepend_scheme=always,
+  split=true) after the Replace(\" \" -> \u2581) normalizer: every space is
+  a \u2581, one more is prepended unless the text already starts with one,
+  and the text is split so each piece starts with its \u2581 (an empty gap
+  yields nothing: prepend on an empty string is a no-op)."
+  [seg]
+  (let [s (str/replace seg " " lower-one-eighth-block)]
+    (if (empty? s)
+      []
+      (let [s (if (str/starts-with? s lower-one-eighth-block) s (str lower-one-eighth-block s))
+            n (count s)]
+        (loop [i 1 from 0 out []]
+          (cond
+            (>= i n) (conj out (subs s from n))
+            (= (nth s i) (first lower-one-eighth-block)) (recur (inc i) i (conj out (subs s from i)))
+            :else (recur (inc i) from out)))))))
+
+(defn sp-symbols
+  "BPE::merge_word's starting symbols for one piece: each char that is a
+  vocab token as itself; otherwise its UTF-8 bytes as <0xNN> tokens when
+  byte fallback is on and every one exists; otherwise the unk token, with
+  consecutive unks fused into one when fuse-unk is on."
+  [piece vocab byte-fallback? fuse-unk? unk]
+  (loop [cs (seq piece) out [] unk-run? false]
+    (if (empty? cs)
+      out
+      (let [c (str (first cs))]
+        (if (contains? vocab c)
+          (recur (rest cs) (conj out c) false)
+          (let [bytes (when byte-fallback?
+                        (let [ts (map #(format "<0x%02X>" %) (string->utf8-bytes c))]
+                          (when (every? #(contains? vocab %) ts) ts)))]
+            (cond
+              bytes (recur (rest cs) (into out bytes) false)
+              (and unk-run? fuse-unk?) (recur (rest cs) out true)
+              :else (recur (rest cs) (conj out unk) true))))))))
+
+(defn- sentencepiece-encode [tok text]
+  (let [vocab (:vocab tok)
+        unk (some (fn [[t i]] (when (= i (:unk (:specials tok))) t)) (:added tok))]
+    (into []
+          (mapcat (fn [seg]
+                    (if (string? seg)
+                      (mapcat (fn [piece]
+                                (->> (sp-symbols piece vocab (:byte-fallback tok) (:fuse-unk tok) unk)
+                                     (#(apply-bpe % (:ranks tok)))
+                                     (keep #(get vocab %))))
+                              (metaspace-pieces seg))
+                      [seg])))
+          (sp-segments text (:added tok) (:max-added tok) (:lstrip tok)))))
+
+(defn encode
+  "Text -> input_ids (no special tokens), matching
+  tok(text, add_special_tokens=False)['input_ids'] for the tokenizer's kind."
+  [tok text]
+  (case (:kind tok)
+    :sentencepiece (sentencepiece-encode tok text)
+    (byte-level-encode tok text)))
 
 (defn special
   "id of :cls/:sep/:pad/:mask/:unk."

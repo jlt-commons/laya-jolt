@@ -322,11 +322,20 @@
                                              ["model" default-model]
                                              ["questions" (:readme-questions cases)]]))
         resp (h {:request-method :post :uri "/v1/systemone" :headers {} :body body})
-        ;; the answer is the python JSON with a routing key appended
-        got (str/trim (:body resp))
-        prefix (subs want 0 (dec (count want)))
-        answer-ok (and (str/starts-with? got prefix)
-                       (str/starts-with? (subs got (count prefix)) ", \"routing\": {"))
+        ;; the python JSON plus a routing key; probabilities are compared to
+        ;; one unit in the fourth decimal, since a value on a rounding
+        ;; boundary can land either side under a different BLAS (byte
+        ;; identity under Accelerate is the test suite's job)
+        got (json/read-str (str/trim (:body resp)))
+        approx (fn approx [a b]
+                 (cond (and (number? a) (number? b)) (<= (Math/abs (- (double a) (double b))) 1.0001e-4)
+                       (and (map? a) (map? b)) (and (= (set (keys a)) (set (keys b)))
+                                                    (every? (fn [[k v]] (approx v (get b k))) a))
+                       (and (sequential? a) (sequential? b)) (and (= (count a) (count b))
+                                                                  (every? true? (map approx a b)))
+                       :else (= a b)))
+        answer-ok (and (approx (json/read-str want) (dissoc got "routing"))
+                       (= "english" (get-in got ["routing" "model"])))
         tok (:tok agent)
         tok-cases (:tok-cases cases)
         tok-golden (:cases (golden "tok"))
@@ -334,8 +343,8 @@
                        (map-indexed vector tok-cases))
         nfc-ok (= (apply str (repeat 300 "क़"))
                   (tk/nfc (apply str (repeat 300 "क़"))))]
-    [["README quickstart answer is byte-identical to the Python engine" answer-ok
-      (when-not answer-ok (str "got " got))]
+    [["README quickstart answer matches the Python engine" answer-ok
+      (when-not answer-ok (str "got " (seq/json-str got)))]
      ["tokenizer reproduces golden/tok.edn" tok-ok nil]
      ["NFC expansion path" nfc-ok nil]]))
 

@@ -6,7 +6,8 @@
   - model.safetensors -> <out>/model/<tensor>.f32, raw little-endian f32.
     F16 tensors are widened by the C kernel (exact); F32 ones copied.
   - <out>/manifest.edn   tensor name -> {:shape :file}
-  - tokenizer.json       -> <out>/tokenizer.edn {vocab merges specials added}
+  - tokenizer.json (+ tokenizer_config.json) -> <out>/tokenizer.edn
+    {vocab merges specials added}, plus the sentencepiece fields for mmBERT
   - encoder/config.json + rl_agent_config.json -> <out>/config.edn
 
   Usage: jolt prepare  (task)  or  jolt -M:prepare [--laya DIR] [--out DIR]"
@@ -114,17 +115,54 @@
 
 ;; --- tokenizer --------------------------------------------------------------------
 
-(defn write-tokenizer [tok-json out]
+(defn tokenizer-specials
+  "{\"cls\" id ...} from tokenizer_config.json's *_token names (plain strings
+  or AddedToken objects) looked up among the added tokens."
+  [tcfg added]
+  (into (sorted-map)
+        (for [k ["cls" "sep" "mask" "pad" "unk"]]
+          (let [v (get tcfg (str k "_token"))
+                name (if (map? v) (get v "content") v)
+                id (get added name)]
+            (when-not id
+              (throw (ex-info (str k "_token " (pr-str name) " is not an added token of this tokenizer")
+                              {:key (str k "_token") :name name})))
+            [k id]))))
+
+(defn tokenizer-kind
+  "What tokenizer.json describes: :byte-level (GPT-2 style: NFC + ByteLevel
+  pre-tokenizer) or :sentencepiece (Metaspace + byte fallback, the
+  mmBERT/Gemma tokenizer)."
+  [tok]
+  (case (get-in tok ["pre_tokenizer" "type"])
+    "ByteLevel" :byte-level
+    "Metaspace" :sentencepiece
+    (throw (ex-info (str "unsupported pre_tokenizer " (pr-str (get-in tok ["pre_tokenizer" "type"])))
+                    {:pre-tokenizer (get tok "pre_tokenizer")}))))
+
+(defn write-tokenizer
+  "tokenizer.json (+ tokenizer_config.json for the special names) ->
+  tokenizer.edn. The byte-level format is byte-identical to the reference
+  converter's (golden/prepare.edn pins it); the sentencepiece one adds
+  :kind, :mask-token, :byte-fallback, :fuse-unk and :lstrip."
+  [tok-json tok-cfg-json out]
   (let [tok (json/read-str (slurp tok-json))
+        tcfg (json/read-str (slurp tok-cfg-json))
+        kind (tokenizer-kind tok)
         vocab (get-in tok ["model" "vocab"])
         merges (get-in tok ["model" "merges"])
         added-tokens (get tok "added_tokens")
         added (into {} (map (fn [t] [(get t "content") (get t "id")])) added-tokens)
-        specials (into (sorted-map)
-                       (map (fn [k] [k (get added (str "[" (str/upper-case k) "]"))]))
-                       ["cls" "sep" "pad" "mask" "unk"])
+        specials (tokenizer-specials tcfg added)
         sb (StringBuilder.)]
-    (.append sb "{:format 1\n :vocab {\n")
+    (.append sb (if (= kind :sentencepiece)
+                  (str "{:format 2\n :kind :sentencepiece\n"
+                       " :mask-token " (edn-str (let [m (get tcfg "mask_token")] (if (map? m) (get m "content") m))) "\n"
+                       " :byte-fallback " (boolean (get-in tok ["model" "byte_fallback"])) "\n"
+                       " :fuse-unk " (boolean (get-in tok ["model" "fuse_unk"])) "\n"
+                       " :lstrip [" (str/join " " (for [t added-tokens :when (get t "lstrip")] (edn-str (get t "content")))) "]\n"
+                       " :vocab {\n")
+                  "{:format 1\n :vocab {\n"))
     (doseq [[t i] (sort-by val vocab)]
       (.append sb "  ") (.append sb (edn-str t)) (.append sb " ") (.append sb (str i)) (.append sb "\n"))
     (.append sb " }\n :merges [\n")
@@ -140,8 +178,8 @@
       (.append sb (str (get t "id"))) (.append sb "]\n"))
     (.append sb " ]}\n")
     (spit (str out "/tokenizer.edn") (.toString sb))
-    (println (format "tokenizer: %d vocab, %d merges, %d added, specials %s"
-                     (count vocab) (count merges) (count added-tokens) (pr-str specials)))))
+    (println (format "tokenizer: %s, %d vocab, %d merges, %d added, specials %s"
+                     (name kind) (count vocab) (count merges) (count added-tokens) (pr-str specials)))))
 
 ;; --- config -------------------------------------------------------------------------
 
@@ -177,7 +215,8 @@
 
 (def checkpoint-files
   "What a Laya checkpoint directory must contain (the Hub repo's layout)."
-  ["model.safetensors" "tokenizer/tokenizer.json" "encoder/config.json" "rl_agent_config.json"])
+  ["model.safetensors" "tokenizer/tokenizer.json" "tokenizer/tokenizer_config.json"
+   "encoder/config.json" "rl_agent_config.json"])
 
 (defn check-checkpoint!
   "Throw {:type :checkpoint-missing} naming the absent files and where to get
@@ -198,9 +237,6 @@
   Prepared data mirrors the layout: <out>/, <out>/multilingual, <out>/typed-decisions."
   (seq/ordered-map [["english" ""] ["multilingual" "multilingual"] ["typed-decisions" "typed-decisions"]]))
 
-;; the multilingual checkpoint's tokenizer (mmBERT / Gemma sentencepiece BPE)
-;; is not ported yet; its weights would convert but nothing could read them
-(def supported #{"english" "typed-decisions"})
 
 (defn checkpoint-dir [laya-home name]
   (let [sub (get checkpoints name)]
@@ -239,7 +275,7 @@
   (check-checkpoint! laya-home)
   (let [entries (convert-weights (str laya-home "/model.safetensors") out)]
     (write-manifest entries out)
-    (write-tokenizer (str laya-home "/tokenizer/tokenizer.json") out)
+    (write-tokenizer (str laya-home "/tokenizer/tokenizer.json") (str laya-home "/tokenizer/tokenizer_config.json") out)
     (write-config (str laya-home "/encoder/config.json") (str laya-home "/rl_agent_config.json") out)
     (println (format "config.edn written; %d tensors, total %.2f GB"
                      (count entries)
@@ -256,16 +292,12 @@
       [(ffi/read sz :int64 0) crc])))
 
 (defn convert-bundle
-  "Convert the checkpoints `plan` lists, skipping the ones this port cannot
-  read yet. Answers {name entries}."
+  "Convert the checkpoints `plan` lists. Answers {name entries}."
   [laya-home out names]
   (into {}
         (for [{:keys [name src out]} (plan laya-home out names)]
-          (if (supported name)
-            (do (println (str "== " name ": " src " -> " out))
-                [name (convert src out)])
-            (do (println (str "== " name ": skipped, its tokenizer is not ported yet"))
-                nil)))))
+          (do (println (str "== " name ": " src " -> " out))
+              [name (convert src out)]))))
 
 (defn -main
   "jolt -M:prepare [--laya DIR] [--out DIR] [--model NAME]. Falls back to

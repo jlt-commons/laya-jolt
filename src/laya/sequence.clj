@@ -146,7 +146,7 @@
 (defn build-sequence
   "Returns [ids markers]: token ids and the [MASK] marker positions."
   [tok state q max-len head-max-len]
-  (let [mask "[MASK]"
+  (let [mask (tk/mask-token tok)
         sp (:specials tok)
         opts (render-options q)
         ins (str/replace (str (:ins q)) mask " ")

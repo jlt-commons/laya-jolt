@@ -110,8 +110,9 @@
   english): what (laya.server/handler agent opts) builds, and what a test
   with one loaded agent wants."
   ([agent] (preloaded agent "english"))
-  ([agent name]
-   (let [r (make-router {})
+  ([agent name] (preloaded agent name {}))
+  ([agent name opts]
+   (let [r (make-router opts)
          key (normalise-name name)]
      (swap! (:agents r) assoc key agent)
      (swap! (:order r) conj key)

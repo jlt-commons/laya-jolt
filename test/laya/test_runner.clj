@@ -20,7 +20,11 @@
     laya.checkpoints-test])
 
 (defn -main
-  [& _]
-  (doseq [ns test-namespaces] (require ns))
-  (let [{:keys [fail error]} (apply t/run-tests test-namespaces)]
-    (System/exit (if (zero? (+ fail error)) 0 1))))
+  "jolt -M:test [namespace ...]: the whole suite, or only the namespaces
+  named (CI runs laya.checkpoints-test one checkpoint at a time, each in
+  its own process: three loaded checkpoints do not fit the mac runner)."
+  [& names]
+  (let [nss (if (seq names) (map symbol names) test-namespaces)]
+    (doseq [ns nss] (require ns))
+    (let [{:keys [fail error]} (apply t/run-tests nss)]
+      (System/exit (if (zero? (+ fail error)) 0 1)))))

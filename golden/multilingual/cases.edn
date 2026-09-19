@@ -1,0 +1,100 @@
+{:model "multilingual"
+ :tok-cases [
+  "Which department should handle this email?"
+  " choice question: invoices, payments, refunds"
+  "  leading double space and\ttab"
+  "Don't stop — it's 2024, isn't it? naïve café résumé ﬁne"
+  "unicodé combining acute (NFD source; NFC must fold)"
+  "MixedCASE WithNumbers 123 45.67 and #hashtags @at"
+  "level 0: not urgent"
+  "true: yes, the statement holds"
+  "Duplicate billing on March invoice #4411"
+  "https://example.com/path?q=1&r=2&x=%20"
+  "emoji 😀 and cjk 中文测试"
+  "$1,234.56 —  -99.2e-3  +0.5"
+  "and\tThe end"
+  "line1\nline2"
+  "a\u001cb\u001fc"
+  "x y"
+  "tab\t\tdouble"
+  "nl\n\n\nrun"
+  "a \tb"
+  "DON'T Shout 'S"
+  "end   "
+  "  lead"
+  " sep"
+  "'re're 're"
+  "z\n\n\n\n\nq"
+  "\u000d\nThe"
+  "मुझसे दो बार शुल्क लिया गया"
+  "二重に請求されました"
+  "客户被重复扣款要求退款"
+  "고객이 두 번 청구되어 환불을 원합니다"
+  "تم خصم المبلغ مرتين من العميل"
+  "С клиента дважды сняли деньги"
+  "Der Kunde wurde zweimal belastet"
+  "Le client a été facturé deux fois"
+  "▁already marked"
+  "text with <mask> inside and <bos> too"
+  "<start_of_turn>user\nhello<end_of_turn>"
+  "𐍈 gothic byte fallback ᚠ runic 🦀"
+  "a  b   c    d"
+  "​ zero width ⁠ joiner"
+  "ﬁ ligature ǅ titlecase Ω ohm"
+  "123456789 3.14 -2 1e10"
+  ""
+  " "
+  "<unk>"
+  "tab\tsep\nnewline"
+]
+ :pre-tok {
+  "Which department should handle this email?" ["▁Which" "▁department" "▁should" "▁handle" "▁this" "▁email" "?"]
+  " choice question: invoices, payments, refunds" ["▁choice" "▁question" ":" "▁invoices" "," "▁payments" "," "▁refunds"]
+  "  leading double space and\ttab" ["▁" "▁leading" "▁double" "▁space" "▁and" "\t" "tab"]
+  "Don't stop — it's 2024, isn't it? naïve café résumé ﬁne" ["▁Don" "'" "t" "▁stop" "▁—" "▁it" "'" "s" "▁" "2" "0" "2" "4" "," "▁isn" "'" "t" "▁it" "?" "▁naïve" "▁café" "▁résumé" "▁ﬁ" "ne"]
+  "unicodé combining acute (NFD source; NFC must fold)" ["▁unicode" "́" "▁combining" "▁acute" "▁(" "N" "FD" "▁source" ";" "▁NFC" "▁must" "▁fold" ")"]
+  "MixedCASE WithNumbers 123 45.67 and #hashtags @at" ["▁Mixed" "CASE" "▁With" "Numbers" "▁" "1" "2" "3" "▁" "4" "5" "." "6" "7" "▁and" "▁#" "hashtags" "▁@" "at"]
+  "level 0: not urgent" ["▁level" "▁" "0" ":" "▁not" "▁urgent"]
+  "true: yes, the statement holds" ["▁true" ":" "▁yes" "," "▁the" "▁statement" "▁holds"]
+  "Duplicate billing on March invoice #4411" ["▁Duplicate" "▁billing" "▁on" "▁March" "▁invoice" "▁#" "4" "4" "1" "1"]
+  "https://example.com/path?q=1&r=2&x=%20" ["▁https" "://" "example" "." "com" "/" "path" "?" "q" "=" "1" "&" "r" "=" "2" "&" "x" "=%" "2" "0"]
+  "emoji 😀 and cjk 中文测试" ["▁emoji" "▁😀" "▁and" "▁c" "jk" "▁中文" "测试"]
+  "$1,234.56 —  -99.2e-3  +0.5" ["▁$" "1" "," "2" "3" "4" "." "5" "6" "▁—" "▁" "▁-" "9" "9" "." "2" "e" "-" "3" "▁" "▁+" "0" "." "5"]
+  "and\tThe end" ["▁and" "\t" "The" "▁end"]
+  "line1\nline2" ["▁line" "1" "\n" "▁line" "2"]
+  "a\u001cb\u001fc" ["▁a" "\u001c" "b" "\u001f" "c"]
+  "x y" ["▁x" " " "y"]
+  "tab\t\tdouble" ["▁tab" "\t\t" "▁double"]
+  "nl\n\n\nrun" ["▁nl" "\n\n\n" "▁run"]
+  "a \tb" ["▁a" "▁" "\t" "b"]
+  "DON'T Shout 'S" ["▁DON" "'" "T" "▁Shout" "▁'" "S"]
+  "end   " ["▁end" "▁" "▁" "▁"]
+  "  lead" ["▁" "  " "lead"]
+  " sep" ["▁ " "sep"]
+  "'re're 're" ["▁'" "re" "'" "re" "▁'" "re"]
+  "z\n\n\n\n\nq" ["▁z" "\n\n\n\n\n" "▁q"]
+  "\u000d\nThe" ["▁\u000d" "\n" "▁The"]
+  "मुझसे दो बार शुल्क लिया गया" ["▁मु" "झ" "से" "▁दो" "▁बार" "▁शु" "ल्क" "▁लिया" "▁गया"]
+  "二重に請求されました" ["▁二" "重" "に" "請求" "されました"]
+  "客户被重复扣款要求退款" ["▁客户" "被" "重复" "扣" "款" "要求" "退款"]
+  "고객이 두 번 청구되어 환불을 원합니다" ["▁고" "객" "이" "▁두" "▁번" "▁청" "구" "되어" "▁환" "불" "을" "▁원" "합니다"]
+  "تم خصم المبلغ مرتين من العميل" ["▁تم" "▁خص" "م" "▁الم" "بلغ" "▁مرت" "ين" "▁من" "▁الع" "ميل"]
+  "С клиента дважды сняли деньги" ["▁С" "▁клиента" "▁два" "жды" "▁сня" "ли" "▁деньги"]
+  "Der Kunde wurde zweimal belastet" ["▁Der" "▁Kunde" "▁wurde" "▁zweimal" "▁bel" "astet"]
+  "Le client a été facturé deux fois" ["▁Le" "▁client" "▁a" "▁été" "▁fact" "uré" "▁deux" "▁fois"]
+  "▁already marked" ["▁already" "▁marked"]
+  "text with <mask> inside and <bos> too" ["▁text" "▁with" " <mask>" "▁inside" "▁and" "▁" "<bos>" "▁too"]
+  "<start_of_turn>user\nhello<end_of_turn>" ["<start_of_turn>" "▁user" "\n" "▁hello" "<end_of_turn>"]
+  "𐍈 gothic byte fallback ᚠ runic 🦀" ["▁" "<0xF0>" "<0x90>" "<0x8D>" "<0x88>" "▁gothic" "▁byte" "▁fallback" "▁" "ᚠ" "▁run" "ic" "▁" "🦀"]
+  "a  b   c    d" ["▁a" "▁" "▁b" "▁" "▁" "▁c" "▁" "▁" "▁" "▁d"]
+  "​ zero width ⁠ joiner" ["▁​" "▁zero" "▁width" "▁⁠" "▁jo" "iner"]
+  "ﬁ ligature ǅ titlecase Ω ohm" ["▁ﬁ" "▁lig" "ature" "▁" "<0xC7>" "<0x85>" "▁title" "case" "▁Ω" "▁ohm"]
+  "123456789 3.14 -2 1e10" ["▁" "1" "2" "3" "4" "5" "6" "7" "8" "9" "▁" "3" "." "1" "4" "▁-" "2" "▁" "1" "e" "1" "0"]
+  "" []
+  " " ["▁"]
+  "<unk>" ["<unk>"]
+  "tab\tsep\nnewline" ["▁tab" "\t" "sep" "\n" "▁newline"]
+}
+ :specials #laya/omap [["cls" 2] ["sep" 1] ["mask" 4] ["pad" 0] ["unk" 3] ["mask-token" "<mask>"]]
+ :readme-state #laya/omap [["from" "kunde@example.de"] ["subject" "Doppelte Abbuchung"] ["body" "Mein Konto wurde zweimal belastet. Bitte erstatten Sie den Betrag bis Freitag zurück, sonst kündigen wir."]]
+ :readme-questions #laya/omap [["department" #laya/omap [["type" "choice"] ["instructions" "Which department should handle this email?"] ["criteria" #laya/omap [["billing" "invoices, payments, refunds"] ["technical" "bugs, outages, integrations"] ["sales" "pricing, contracts, demos"] ["other" "everything else"]]]]] ["urgency" #laya/omap [["type" "score"] ["instructions" "How urgent is this request?"] ["criteria" ["not urgent" "soon" "critical deadline or blocking issue"]]]] ["churn_risk" #laya/omap [["type" "noul"] ["instructions" "Does the user threaten to cancel or switch to a competitor?"]]] ["is_phishing" #laya/omap [["type" "noul"] ["instructions" "Is this email a phishing or scam attempt?"]]]]}

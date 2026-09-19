@@ -9,7 +9,8 @@
             [clojure.test :refer [deftest is testing]]
             [jolt.ffi]
             [laya.model :as laya.model]
-            [laya.tensors :as t]))
+            [laya.tensors :as t]
+            [laya.test-util :as tu]))
 
 (def golden-dir
   (or (System/getenv "LAYA_GOLDEN") "golden"))
@@ -94,12 +95,14 @@
 
 ;; --- encoder: layer-by-layer vs golden ---------------------------------------
 
-;; Absolute bounds on the residual stream. Early layers sit at f32 noise; by
-;; layer 27 the outlier dimensions are in the hundreds and sgemm summation
-;; order shows: Accelerate lands at ~0.03, OpenBLAS (linux CI) at 0.105. The
-;; head layers see the same: ~5e-4 on Accelerate, 1.7e-3 on OpenBLAS. Both
-;; still give byte-identical answers at 4 decimals (agent_test, server_test).
-(def ^:private last-layer-tol 0.25)
+;; Bounds on the residual stream. Early layers sit at f32 noise. By layer 27
+;; the outlier dimensions reach ~3e4, where an f32 ulp is 2e-3, and sgemm
+;; summation order shows: Accelerate lands at 0.008 (english) to 0.25
+;; (typed-decisions), OpenBLAS on the linux runners higher still, so the
+;; bound is relative to the stream's scale (english 3e-7, typed-decisions
+;; 9e-6 on Accelerate). The head layers, after their LayerNorm, are back to
+;; O(1) values: ~5e-4 on Accelerate, 1.7e-3 on OpenBLAS.
+(def ^:private last-layer-rel-tol 5e-5)
 (def ^:private head-layer-tol 5e-3)
 
 (deftest encoder-matches-torch
@@ -128,8 +131,12 @@
                                     (laya.model/encoder-layer! w cfg k h att0 full slid)))
                         emb (range (inc i)))
             gold (read-golden-f32 (keyword (str "layer-" i)) layers)]
-        (is (< (mx out gold 0 (* 74 1024)) (if (= i 27) last-layer-tol 1e-4))
-            (str "layer " i " max-abs " (mx out gold 0 (* 74 1024))))))
+        (if (= i 27)
+          (let [[rel diff scale] (tu/relative-max-abs out gold (* 74 1024))]
+            (is (< rel last-layer-rel-tol)
+                (format "layer 27: max-abs %.4g of a %.4g-scale stream (rel %.2e)" diff scale rel)))
+          (is (< (mx out gold 0 (* 74 1024)) 1e-4)
+              (str "layer " i " max-abs " (mx out gold 0 (* 74 1024)))))))
     (testing "padded batch row 1 (64 real tokens): real rows match, pad rows ignored"
       (let [ids1 (t/from-ints (map int (second (layers :ids))))
             att1 (t/from-bytes (second (layers :att)) [74])
@@ -144,8 +151,14 @@
                   (let [h2 (laya.model/encoder-layer! w cfg k h att1 full1 slid1)]
                     (when (#{0 1 2 27} k)
                       (let [gold (read-golden-f32 (keyword (str "layer-" k)) layers)]
-                        (is (< (mx h2 gold off n-real) (if (= k 27) last-layer-tol 1e-4))
-                            (str "row 1 layer " k " max-abs " (mx h2 gold off n-real)))))
+                        (if (= k 27)
+                          ;; row 1 sits at offset `off` in the golden; compare through a view
+                          (let [gold-row {:p (jolt.ffi/segment (+ (jolt.ffi/address (t/ptr gold)) (* off 4)))}
+                                [rel diff scale] (tu/relative-max-abs h2 gold-row n-real)]
+                            (is (< rel last-layer-rel-tol)
+                                (format "row 1 layer 27: max-abs %.4g of a %.4g-scale stream (rel %.2e)" diff scale rel)))
+                          (is (< (mx h2 gold off n-real) 1e-4)
+                              (str "row 1 layer " k " max-abs " (mx h2 gold off n-real))))))
                     h2))
                 emb1 (range 28))))))
 

@@ -87,15 +87,14 @@
       (is (= 1 (:max-loaded (router/make-router {:loader (fake-loader (atom [])) :max-loaded 0})))))))
 
 (deftest predict-is-system-one-plus-routing
-  (let [r (router/make-router {:models {"english" tu/data-dir}
+  (let [r (router/make-router {:models {"english" tu/data-dir "multilingual" "target/not-prepared"}
                                ;; the suite's one english agent; other names go through the
                                ;; default loader so the not-prepared path is still exercised
                                :loader (fn [name dir] (if (= name "english") @tu/agent (router/load-prepared name dir)))})
         cases (tu/read-golden "cases")
-        out (router/predict r (:readme-state cases) (:readme-questions cases))
-        want (json/read-str (:system-one (tu/read-golden "readme")))]
+        out (router/predict r (:readme-state cases) (:readme-questions cases))]
     (is (= ["model" "answers" "usage" "routing"] (keys out)))
-    (is (= want (json/read-str (seq/json-str (dissoc out "routing")))))
+    (tu/answers-match (:system-one (tu/read-golden "readme")) (seq/json-str (dissoc out "routing")))
     (is (= "english" (get-in out ["routing" "model"])))
     (is (= "English Latin text" (get-in out ["routing" "reason"])))
     (is (= ["english"] (router/loaded r)))

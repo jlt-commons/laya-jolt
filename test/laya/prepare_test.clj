@@ -54,7 +54,8 @@
                  (catch Exception e e))]
       (is (some? e) "convert must refuse a directory without the checkpoint files")
       (is (= :checkpoint-missing (:type (ex-data e))))
-      (is (= ["model.safetensors" "tokenizer/tokenizer.json" "encoder/config.json" "rl_agent_config.json"]
+      (is (= ["model.safetensors" "tokenizer/tokenizer.json" "tokenizer/tokenizer_config.json"
+              "encoder/config.json" "rl_agent_config.json"]
              (:missing (ex-data e))))
       (is (str/includes? (ex-message e) "https://huggingface.co/convaiinnovations/laya"))
       (is (str/includes? (ex-message e) dir)))
@@ -106,4 +107,47 @@
           (is (= 1024 (:max-len cfg)))
           (is (= 256 (:head-max-len cfg)))
           (is (= [1.0148024559020996 1.0374259948730469 1.0575125217437744] (:temperature cfg)))))
+      (jolt.host/delete-tree! out))))
+
+(deftest tokenizer-specials-come-from-tokenizer-config
+  (testing "plain strings or AddedToken objects"
+    (is (= {"cls" 2 "sep" 1 "mask" 4 "pad" 0 "unk" 3}
+           (prep/tokenizer-specials {"cls_token" "<bos>" "sep_token" "<eos>" "mask_token" {"content" "<mask>"}
+                                     "pad_token" "<pad>" "unk_token" "<unk>"}
+                                    {"<bos>" 2 "<eos>" 1 "<mask>" 4 "<pad>" 0 "<unk>" 3}))))
+  (testing "a name that is not an added token is an error, not a nil id"
+    (is (thrown-with-msg? Exception #"mask_token" (prep/tokenizer-specials {"cls_token" "[CLS]" "sep_token" "[SEP]" "mask_token" "[MASK]" "pad_token" "[PAD]" "unk_token" "[UNK]"}
+                                                                          {"[CLS]" 1 "[SEP]" 2 "[PAD]" 3 "[UNK]" 4})))))
+
+(deftest tokenizer-kind-from-the-pre-tokenizer
+  (is (= :byte-level (prep/tokenizer-kind {"pre_tokenizer" {"type" "ByteLevel"} "normalizer" {"type" "NFC"}})))
+  (is (= :sentencepiece (prep/tokenizer-kind {"pre_tokenizer" {"type" "Metaspace" "replacement" "▁" "prepend_scheme" "always" "split" true}
+                                              "normalizer" {"type" "Replace" "pattern" {"String" " "} "content" "▁"}})))
+  (is (thrown-with-msg? Exception #"Whitespace" (prep/tokenizer-kind {"pre_tokenizer" {"type" "Whitespace"}}))))
+
+(deftest jolt-prepare-reproduces-multilingual
+  ;; mmBERT-base weights and config through the same converter; the
+  ;; tokenizer.edn is this port's own sentencepiece format, checked by the
+  ;; tokenizer cases in checkpoints_test rather than by the Python converter's CRC
+  (let [src (prep/checkpoint-dir laya-home "multilingual")]
+    (is (.exists (io/file src "model.safetensors"))
+        (str "multilingual checkpoint not found under " src " (download the subfolder of the Hub repo)"))
+    (let [golden (:files (edn/read-string (slurp (str golden-dir "/multilingual/prepare.edn"))))
+          out "target/prepare-test-ml"]
+      (jolt.host/delete-tree! out)
+      (prep/convert src out)
+      (doseq [[fn {:keys [size crc32]}] golden :when (not= fn "tokenizer.edn")]
+        (is (= [size crc32] (prep/file-crc32 (str out "/" fn))) fn))
+      (let [cfg (edn/read-string (slurp (str out "/config.edn")))
+            tok (edn/read-string (slurp (str out "/tokenizer.edn")))]
+        (is (= 768 (:hidden-size cfg)))
+        (is (= 22 (:num-layers cfg)))
+        (is (= 160000 (:rope-local cfg)) "mmBERT uses 160k for sliding layers too")
+        (is (= :sentencepiece (:kind tok)))
+        (is (= "<mask>" (:mask-token tok)))
+        (is (= {:cls 2 :sep 1 :mask 4 :pad 0 :unk 3} (:specials tok)))
+        (is (= ["<mask>"] (:lstrip tok)))
+        (is (true? (:byte-fallback tok)))
+        (is (= 256000 (count (:vocab tok))))
+        (is (= 580604 (count (:merges tok)))))
       (jolt.host/delete-tree! out))))

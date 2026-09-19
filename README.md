@@ -1,14 +1,19 @@
 # laya-jolt
 
-Pure-Clojure inference for the Laya decision model, running on
+Pure-Clojure inference for the Laya decision models, running on
 [jolt](https://github.com/jolt-lang/jolt) (Chez Scheme, no JVM). Same weights,
-same outputs: the stack reproduces the Python engine's `Agent.system_one`
-answer for the README quickstart byte-for-byte.
+same outputs: the stack reproduces the Python package's `Agent.system_one`
+answer for the README quickstart byte-for-byte (under Apple's Accelerate;
+within one unit in the fourth decimal under OpenBLAS), on all three
+checkpoints of the [convaiinnovations/laya](https://huggingface.co/convaiinnovations/laya)
+bundle, and picks the checkpoint per request the way the package's `Router`
+does.
 
-The model is a ModernBERT-large encoder (28 layers, RoPE, alternating
-full/sliding attention, SwiGLU) plus a 2-layer decision head, a scorer, and an
-act head. It does not generate text: it consumes a serialized `state` and a set
-of typed questions, and returns calibrated typed answers.
+The models are ModernBERT encoders (RoPE, alternating full/sliding
+attention, GeGLU; ModernBERT-large for `english` and `typed-decisions`,
+mmBERT-base for `multilingual`) plus a 2-layer decision head, a scorer, and
+an act head. They do not generate text: they consume a serialized `state`
+and a set of typed questions, and return calibrated typed answers.
 
 Everything is f32 end to end. F16 checkpoint weights are widened to f32 once,
 during `prepare`, so the numerics match the torch CPU oracle exactly.
@@ -24,28 +29,29 @@ checkpoints:
 |---|---|---|---|---|
 | `english` | the root | ModernBERT-large, 421M | 512 | English text |
 | `typed-decisions` | `typed-decisions/` | ModernBERT-large, 421M | 1024 | the four typed-decisions workflows (invoice processing, security incidents, customer service, agent-trace observability) |
-| `multilingual` | `multilingual/` | mmBERT-base, 322M | 1024 | 100+ languages (its tokenizer is not ported yet; `prepare` skips it) |
+| `multilingual` | `multilingual/` | mmBERT-base, 322M | 1024 | 100+ languages (Gemma sentencepiece tokenizer, 256k vocab) |
 
-`jolt prepare` reads four files per checkpoint from a directory laid out
+`jolt prepare` reads five files per checkpoint from a directory laid out
 like the repo: the root is english, the subfolders are optional.
 
 ```
 ../laya/
   model.safetensors          # ~800 MB, F16
   tokenizer/tokenizer.json
+  tokenizer/tokenizer_config.json
   encoder/config.json
   rl_agent_config.json
-  typed-decisions/           # same four files, optional
-  multilingual/              # same four files, optional
+  typed-decisions/           # same five files, optional (~800 MB)
+  multilingual/              # same five files, optional (~640 MB)
 ```
 
-Fetch them with nothing but curl (drop `typed-decisions/` from the first
-loop if you only want english):
+Fetch them with nothing but curl (trim the first loop to the checkpoints
+you want; `""` is english):
 
 ```
-for sub in "" typed-decisions/; do
+for sub in "" typed-decisions/ multilingual/; do
   mkdir -p ../laya/${sub}tokenizer ../laya/${sub}encoder
-  for f in model.safetensors tokenizer/tokenizer.json encoder/config.json rl_agent_config.json; do
+  for f in model.safetensors tokenizer/tokenizer.json tokenizer/tokenizer_config.json encoder/config.json rl_agent_config.json; do
     curl -fL -o ../laya/$sub$f https://huggingface.co/convaiinnovations/laya/resolve/main/$sub$f
   done
 done
@@ -57,7 +63,7 @@ https://huggingface.co/convaiinnovations/laya ../laya`), or with the Hub CLI
 and point `LAYA_HOME` at it (or `jolt -M:prepare --laya DIR --out data`).
 `jolt prepare` converts every checkpoint it finds there into the same layout
 under the data root (`data/`, `data/typed-decisions`, `data/multilingual`);
-`--model NAME` converts one. It refuses a root that lacks any of the four
+`--model NAME` converts one. It refuses a root that lacks any of the five
 files and says so.
 
 ## Build and run
@@ -281,17 +287,22 @@ suffixes in `deps.edn` if your distro's `libicuuc.so` version is not listed.
 
 ## Status
 
-Encoder, head, tokenizer, sequence, agent, the email workflow and the
-checkpoint conversion all match their golden traces, for the english and
-typed-decisions checkpoints. `system-one` on the quickstart case is
-byte-identical to the Python output on both. Language detection and the
-Router's decisions match the Python package on every pinned case; the
-multilingual checkpoint routes correctly but cannot be loaded until its
-tokenizer is ported.
+Encoder, head, both tokenizers, sequence, agent, the workflows and the
+checkpoint conversion all match their golden traces on all three
+checkpoints (`golden/`, `golden/typed-decisions/`, `golden/multilingual/`).
+`system-one` on the quickstart case is byte-identical to the Python output
+on each of them under Accelerate; language detection, the Router's
+decisions and the presets match the Python package on every pinned case.
 
 Per-forward temporaries live in an ffi arena that closes with the call, so a
-long-running process stays at the size of the weights (~1.7 GB f32).
+long-running process stays at the size of the loaded weights (~1.7 GB f32
+per ModernBERT-large checkpoint, 1.3 GB for mmBERT-base; the server keeps
+`--max-loaded` of them).
 
-The one known source of last-digit drift: Python computes the calibrated
-softmax in float32 (numpy), the port in doubles, so a probability that sits
-within ~1e-7 of a 4-decimal rounding boundary can round differently.
+Two known sources of last-digit drift, both one unit in the fourth decimal
+of a probability sitting on a rounding boundary: Python computes the
+calibrated softmax in float32 (numpy) and the port in doubles; and sgemm
+summation order differs between BLAS libraries, and between the CPU
+models OpenBLAS picks its kernels for (the same weights gave 0.3142 on one
+Linux CI machine and 0.3143 on another). The suite asserts byte identity
+under Accelerate and the one-ulp bound everywhere.
