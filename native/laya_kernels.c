@@ -6,6 +6,10 @@
  * Tolerances: every kernel is tested against the torch CPU-float32 oracle
  * (golden/ sidecars dumped from transformers/torch itself). f32 throughout.
  */
+/* fseeko/off_t are POSIX, not C11: glibc hides them under -std=c11 unless
+ * asked (macOS exposes them regardless). Must precede every include. */
+#define _POSIX_C_SOURCE 200809L
+#define _FILE_OFFSET_BITS 64
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
