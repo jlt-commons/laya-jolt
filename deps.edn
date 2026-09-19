@@ -1,0 +1,50 @@
+{:paths ["src"]
+
+ ;; kernels: built from native/laya_kernels.c by the `kernels` task.
+ ;; icu: NFC for the tokenizer. mac ships libicucore in the shared cache;
+ ;; linux distros name it libicuuc.so.<ver>.
+ ;; blas: Accelerate framework on mac, OpenBLAS elsewhere.
+ :jolt/native [{:name "laya_kernels"
+                :darwin ["native/liblaya_kernels.dylib"]
+                :linux  ["native/liblaya_kernels.so"]}
+               {:name "icu"
+                :darwin ["libicucore.dylib"]
+                :linux  ["libicuuc.so.76" "libicuuc.so.75" "libicuuc.so.74"
+                         "libicuuc.so.72" "libicuuc.so.71" "libicuuc.so"]}
+               {:name "blas"
+                :darwin ["/System/Library/Frameworks/Accelerate.framework/Accelerate"]
+                :linux  ["libopenblas.so.0" "libopenblas.so"]}]
+
+ :tasks
+ {:requires ([babashka.fs :as fs])
+
+  :init (do (def mac? (some? (re-find #"^Mac" (System/getProperty "os.name"))))
+            (def kern-lib (str "native/liblaya_kernels." (if mac? "dylib" "so")))
+            (def laya-home (or (System/getenv "LAYA_HOME") "../laya")))
+
+  kernels
+  {:doc "compile native/laya_kernels.c into the tensor-op kernel library"
+   :task (if (and (fs/exists? kern-lib)
+                  (empty? (fs/modified-since kern-lib ["native/laya_kernels.c"])))
+           (println "kernels: up to date -" kern-lib)
+           (do (shell "cc" "-O2" "-std=c11" "-shared" "-fPIC"
+                      "native/laya_kernels.c" "-o" kern-lib)
+               (println "built:" kern-lib)))}
+
+  prepare
+  {:doc "convert the Laya checkpoint (LAYA_HOME, default ../laya) into data/"
+   :task (shell "python3" "python/prepare.py" "--laya" laya-home)}
+
+  traces
+  {:doc "re-dump the golden traces from the torch CPU oracle into golden/"
+   :task (shell ".venv/bin/python" "python/dump_traces.py" "--laya" laya-home)}
+
+  clean-native
+  {:doc "remove the compiled kernel library"
+   :task (do (fs/delete-if-exists "native/liblaya_kernels.dylib")
+             (fs/delete-if-exists "native/liblaya_kernels.so")
+             (println "removed kernel libs"))}}
+
+ :aliases {:test {:extra-paths ["test"]
+                  :main-opts ["-m" "laya.test-runner"]}
+           :run {:main-opts ["-m" "laya.demo"]}}}

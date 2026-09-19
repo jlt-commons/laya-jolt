@@ -1,0 +1,316 @@
+(ns laya.tensors
+  "f32 tensors as (ffi) buffer views + the C kernel/BLAS ops the model needs.
+
+  A tensor is {:p ptr :shape [rows cols] :size n} — raw pointers into ffi
+  buffers, row-major, little-endian f32. Matmuls call cblas_sgemm through
+  the blas native (Accelerate on mac, OpenBLAS on linux); the elementwise
+  and reduction ops are native/laya_kernels.c. Nothing per-element crosses
+  back into Clojure."
+  (:require [clojure.java.io :as io]
+            [jolt.ffi :as ffi]))
+
+;; --- cblas (Accelerate / OpenBLAS) -------------------------------------------
+;; CBLAS_ROW_MAJOR=101. sgemm computes C = alpha*A*B + beta*C, all row-major
+;; f32. Our matmuls are always out = X @ W^T with W stored [out-dim x in-dim]
+;; (torch Linear convention), so W is transposed via the TransB=1 flag.
+
+(ffi/defcfn cblas-sgemm* "cblas_sgemm"
+  [:int :int :int :int64 :int64 :int64
+   :float :pointer :int64 :pointer :int64
+   :float :pointer :int64] :void)
+
+(def ^:private RowMajor 101)
+(def ^:private NoTrans 111)
+(def ^:private Trans 112)
+
+;; --- kernels (native/laya_kernels.c) ------------------------------------------
+
+(ffi/defcfn gather-rows* "lla_gather_rows"
+  [:pointer :pointer :int64 :int64 :pointer] :void)
+(ffi/defcfn layernorm* "lla_layernorm"
+  [:pointer :pointer :pointer :int64 :int64 :float :pointer] :void)
+(ffi/defcfn gelu* "lla_gelu" [:pointer :int64 :pointer] :void)
+(ffi/defcfn relu* "lla_relu" [:pointer :int64 :pointer] :void)
+(ffi/defcfn silu* "lla_silu" [:pointer :int64 :pointer] :void)
+(ffi/defcfn swiglu* "lla_swiglu" [:pointer :int64 :int64 :pointer] :void)
+(ffi/defcfn rope-tables* "lla_rope_tables"
+  [:double :int64 :int64 :pointer :pointer] :void)
+(ffi/defcfn rope-apply* "lla_rope_apply"
+  [:pointer :pointer :pointer :int64 :int64 :int64] :void)
+(ffi/defcfn split-heads* "lla_split_heads"
+  [:pointer :int64 :int64 :int64 :pointer] :void)
+(ffi/defcfn merge-heads* "lla_merge_heads"
+  [:pointer :int64 :int64 :int64 :pointer] :void)
+(ffi/defcfn allowed-mask* "lla_allowed_mask"
+  [:pointer :int64 :int64 :int64 :pointer] :void)
+(ffi/defcfn masked-softmax* "lla_masked_softmax"
+  [:pointer :pointer :int64 :pointer] :void)
+(ffi/defcfn scores* "lla_scores"
+  [:pointer :pointer :int64 :int64 :int64 :double :pointer] :void)
+(ffi/defcfn weighted-sum* "lla_weighted_sum"
+  [:pointer :pointer :int64 :int64 :int64 :pointer] :void)
+(ffi/defcfn add-scaled* "lla_add_scaled"
+  [:pointer :pointer :int64 :int64 :float :pointer] :void)
+(ffi/defcfn add-qtype-bias* "lla_add_qtype_bias"
+  [:pointer :pointer :pointer :int64 :int64 :pointer] :void)
+(ffi/defcfn softmax* "lla_softmax" [:pointer :int64 :int64 :pointer] :void)
+
+;; --- tensor plumbing ----------------------------------------------------------
+
+(defn ptr [t] (:p t))
+(defn shape [t] (:shape t))
+(defn size [t] (:size t))
+
+(defn make
+  [shape]
+  {:p (ffi/alloc (* 4 (apply * shape)))
+   :shape (vec shape)
+   :size (apply * shape)})
+
+(defn get*
+  "Read element i (pointer, not tensor)."
+  [p i]
+  (ffi/read p :float (* 4 i)))
+
+(defn set*
+  [p i v]
+  (ffi/write p :float (float v) (* 4 i)))
+
+(defn from-floats
+  [xs]
+  (let [n (count xs)
+        t (make [n])]
+    (dotimes [i n]
+      (set* (:p t) i (nth xs i)))
+    t))
+
+(defn from-ints
+  "int64 buffer for ids (embedding lookup indices)."
+  [xs]
+  (let [n (count xs)
+        t {:p (ffi/alloc (* 8 n)) :shape [n] :size n}]
+    (dotimes [i n]
+      (ffi/write (:p t) :int64 (long (nth xs i)) (* 8 i)))
+    t))
+
+(defn from-bytes
+  "uint8 buffer from 0/1 values."
+  ([xs] (from-bytes xs [(count xs)]))
+  ([xs shape]
+   (let [n (count xs)
+         t {:p (ffi/alloc n) :shape (vec shape) :size (apply * shape)}]
+     (dotimes [i n]
+       (ffi/write (:p t) :uint8 (byte (nth xs i)) i))
+     t)))
+
+(defn to-floats
+  [t]
+  (mapv #(get* (:p t) %) (range (:size t))))
+
+(defn load-file
+  "Read a raw f32 file into a fresh tensor of the given shape."
+  [path shape]
+  (let [n (apply * shape)
+        f (io/file path)
+        expected (* 4 n)
+        len (.length f)]
+    (when-not (= len expected)
+      (throw (ex-info "file size mismatch" {:path path :expected expected :got len})))
+    ;; io/file + Files/readAllBytes shim: copy the raw bytes then write-array
+    (let [t (make shape)
+          bytes (java.nio.file.Files/readAllBytes (.toPath (io/file path)))]
+      (ffi/write-array (:p t) bytes)
+      t)))
+
+(defn load-tensor
+  "Load one named tensor from data/manifest.edn."
+  [manifest data-dir name]
+  (let [{:keys [shape file]} (get-in manifest [:tensors name])]
+    (when-not shape
+      (throw (ex-info "tensor not in manifest" {:name name})))
+    (load-file (str data-dir "/" file) shape)))
+
+;; --- ops ----------------------------------------------------------------------
+
+(defn mmul
+  "out = X @ W^T. X [m x k], W [n x k] -> out [m x n]. torch Linear."
+  [X W]
+  (let [[m k] (:shape X)
+        [n k2] (:shape W)]
+    (when (or (nil? n) (not= k k2))
+      (throw (ex-info "mmul shape mismatch" {:x (:shape X) :w (:shape W)})))
+    (let [out (make [m n])]
+      (cblas-sgemm* RowMajor NoTrans Trans
+                    (long m) (long n) (long k)
+                    1.0 (:p X) (long k)
+                    (:p W) (long k)
+                    0.0 (:p out) (long n))
+      out)))
+
+(defn embeddings
+  "Gather rows then LayerNorm (weight-only, norm_bias=false) exactly as
+  ModernBertEmbeddings: norm(tok_embeddings(ids))."
+  [emb-w ids n d norm-w]
+  (let [g (make [n d])
+        out (make [n d])]
+    (gather-rows* (:p emb-w) (:p ids) (long n) (long d) (:p g))
+    (layernorm* (:p g) (:p norm-w) 0 (long n) (long d) 1e-5 (:p out))
+    out))
+
+(defn gather
+  "Row gather: out[i,:] = src[ids[i],:]."
+  [src ids n d]
+  (let [out (make [n d])]
+    (gather-rows* (:p src) (:p ids) (long n) (long d) (:p out))
+    out))
+
+(defn layernorm
+  "LayerNorm with optional bias (torch nn.LayerNorm)."
+  ([x w eps] (layernorm x w 0 eps))
+  ([x w b eps]
+   (let [[n d] (:shape x)
+         out (make [n d])
+         bp (if (map? b) (long (:p b)) 0)]
+     (layernorm* (:p x) (:p w) bp (long n) (long d) (float eps) (:p out))
+     out)))
+
+(defn gelu [x]
+  (let [n (:size x) out (make (:shape x))]
+    (gelu* (:p x) (long n) (:p out))
+    out))
+
+(defn relu [x]
+  (let [n (:size x) out (make (:shape x))]
+    (relu* (:p x) (long n) (:p out))
+    out))
+
+(defn swiglu
+  "in [n x 2*mid] -> out [n x mid], act(input)*gate with erf-gelu."
+  [x mid]
+  (let [[n _] (:shape x) out (make [n mid])]
+    (swiglu* (:p x) (long n) (long mid) (:p out))
+    out))
+
+(defn rope-tables
+  [theta d len]
+  (let [cos-t (make [len d])
+        sin-t (make [len d])]
+    (rope-tables* (double theta) (long d) (long len) (:p cos-t) (:p sin-t))
+    [cos-t sin-t]))
+
+(defn rope-apply!
+  "Apply rope to head-major q (and k): modifies q in place."
+  [q cos-t sin-t n-heads L d]
+  (rope-apply* (:p q) (:p cos-t) (:p sin-t) (long n-heads) (long L) (long d))
+  q)
+
+(defn split-heads
+  [x L H hd]
+  (let [out (make [(* H L) hd])]
+    (split-heads* (:p x) (long L) (long H) (long hd) (:p out))
+    out))
+
+(defn merge-heads
+  [src H L hd]
+  (let [out (make [L (* H hd)])]
+    (merge-heads* (:p src) (long H) (long L) (long hd) (:p out))
+    out))
+
+(defn byte-matrix
+  "uint8 matrix [r x c] in a raw byte buffer."
+  [r c]
+  {:p (ffi/alloc (* r c)) :shape [r c] :size (* r c)})
+
+(defn allowed-mask
+  "Allowed matrix [L x L] for batch row b: full when window<0, else |i-j|<=window."
+  [att b L window]
+  (let [m (byte-matrix L L)]
+    (allowed-mask* (:p att) (long b) (long L) (long window) (:p m))
+    m))
+
+(defn masked-softmax
+  [scores allowed L]
+  (let [out (make [(* L L)])]
+    (masked-softmax* (:p scores) (:p allowed) (long L) (:p out))
+    out))
+
+(defn scores
+  "Q@K^T*scale for one head: q [n x hd], k [m x hd] -> [n x m]."
+  [q k scale]
+  (let [[n d] (:shape q)
+        [m d2] (:shape k)
+        out (make [n m])]
+    (scores* (:p q) (:p k) (long n) (long m) (long d) (double scale) (:p out))
+    out))
+
+(defn weighted-sum
+  "P @ V: p [n x m], v [m x d] -> [n x d]."
+  [p v]
+  (let [[n m] (:shape p)
+        [m2 d] (:shape v)
+        out (make [n d])]
+    (weighted-sum* (:p p) (:p v) (long n) (long m) (long d) (:p out))
+    out))
+
+(defn add-qtype!
+  "h += type_emb[qtype] per row (in place). h [n x d], bias [3 x d]."
+  [h bias qtype-ids n d]
+  (add-qtype-bias* (:p h) (:p bias) (:p qtype-ids) (long n) (long d) (:p h))
+  h)
+
+(defn softmax
+  "Row softmax over k columns."
+  [x k]
+  (let [n (quot (:size x) k)
+        out (make (:shape x))]
+    (softmax* (:p x) (long n) (long k) (:p out))
+    out))
+
+(defn add-scaled
+  "out = a + alpha*b over an [n x d] block."
+  [a b alpha]
+  (let [n (long (first (:shape a)))
+        d (long (if (second (:shape a)) (second (:shape a)) 1))
+        out (make (:shape a))]
+    (add-scaled* (:p a) (:p b) n d (float alpha) (:p out))
+    out))
+
+(defn relu!
+  "In-place ReLU."
+  [x]
+  (relu* (:p x) (long (:size x)) (:p x))
+  x)
+
+(defn gelu!
+  "In-place erf-GELU."
+  [x]
+  (gelu* (:p x) (long (:size x)) (:p x))
+  x)
+
+(defn reshape
+  [t shape]
+  (assoc t :shape (vec shape)))
+
+(defn t-size [t] (:size t))
+
+;; --- test helpers -------------------------------------------------------------
+
+(defn eq-bytes?
+  "Byte-wise equality of two uint8 'tensors' (allowed masks)."
+  [a b]
+  (and (= (:size a) (:size b))
+       (loop [i 0]
+         (or (= i (:size a))
+             (and (= (ffi/read (:p a) :uint8 i) (ffi/read (:p b) :uint8 i))
+                  (recur (inc i)))))))
+
+(defn first-mismatch
+  [a b]
+  (loop [i 0]
+    (if (or (= i (:size a)) (= (ffi/read (:p a) :uint8 i) (ffi/read (:p b) :uint8 i)))
+      (if (= i (:size a)) :none [i (ffi/read (:p a) :uint8 i) (ffi/read (:p b) :uint8 i)])
+      [i (ffi/read (:p a) :uint8 i) (ffi/read (:p b) :uint8 i)])))
+
+(defn get
+  [p i]
+  (ffi/read p :float (* 4 i)))

@@ -1,0 +1,8 @@
+.venv/
+data/
+__pycache__/
+*.dylib
+*.so
+*.o
+.nrepl-port
+.dirge/
