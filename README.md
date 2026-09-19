@@ -249,6 +249,21 @@ the native library and `data/`, then:
 (server/stop s)
 ```
 
+Or route between the checkpoints like the Python `Router`, loading each on
+first use and keeping `:max-loaded` resident:
+
+```clojure
+(require '[laya.router :as router])
+(def rt (router/make-router {:data "data" :max-loaded 2}))          ; data/, data/multilingual, data/typed-decisions
+(router/route rt {"body" "Der Kunde wurde zweimal belastet"} questions)   ; the decision, nothing loaded
+;; => {"model" "multilingual", "repo" "convaiinnovations/laya/multilingual",
+;;     "reason" "Latin script but language looks like 'de', not English", ...}
+(router/predict rt state questions)                                  ; system-one + "routing"
+(router/predict rt state questions :model "typed-decisions")         ; or :lang "de", :task "typed_decisions"
+(router/loaded rt)                                                   ; ["multilingual" "typed-decisions"]
+(def h (server/handler rt {:workflows (laya.workflows/load-workflows ["workflows"])}))
+```
+
 ### As a binary
 
 `jolt binary` runs `jolt build -m laya.server -o laya-server` with the C
