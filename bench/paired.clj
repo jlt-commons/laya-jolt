@@ -18,7 +18,10 @@
                              [--rounds 30] [--warmup 3] [--data DIR] [--model NAME]
 
   Candidates, the first the baseline: cpu (the C kernels), mlx (lev.mlx
-  at f32, once jolt mlx has built it), mlx16 (lev.mlx at f16). `cpu,cpu`
+  at f32, once jolt mlx has built it), mlx16 (lev.mlx at f16), fullhead
+  (the C kernels with the last head layer in full, where cpu prunes its
+  out-projection and FFN to the CLS + marker rows), mlxfull (the same
+  for mlx at f32). `cpu,cpu`
   measures the noise floor: a ratio of 1 inside its interval, and how
   wide that interval is on this machine."
   (:require [clojure.string :as str]
@@ -148,7 +151,10 @@
     "cpu" (router/load-model rt model)   ; the router keeps one agent per checkpoint: cpu,cpu is the same agent twice
     "mlx" (mlx/load-agent (get (:models rt) (router/normalise-name model)) {:name model :dtype :f32})
     "mlx16" (mlx/load-agent (get (:models rt) (router/normalise-name model)) {:name model :dtype :f16})
-    (throw (ex-info (str "unknown candidate " (pr-str name) "; cpu, mlx or mlx16") {:type :unknown-candidate :name name}))))
+    "mlxfull" (mlx/load-agent (get (:models rt) (router/normalise-name model)) {:name model :dtype :f32 :selected-head false})
+    ;; the C kernels with the last head layer in full (the default prunes it to the CLS + marker rows)
+    "fullhead" (assoc-in (router/load-model rt model) [:cfg :selected-head] false)
+    (throw (ex-info (str "unknown candidate " (pr-str name) "; cpu, fullhead, mlx, mlx16 or mlxfull") {:type :unknown-candidate :name name}))))
 
 (defn- usage []
   (binding [*out* *err*]

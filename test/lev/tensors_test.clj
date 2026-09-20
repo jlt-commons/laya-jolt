@@ -517,3 +517,42 @@
         (is (close lg-b (first (nth batched 1)) 1e-5))
         (is (close (first (second swapped)) (first (nth batched 0)) 1e-5))
         (is (close (second (first swapped)) (second (nth batched 1)) 1e-5))))))
+
+(deftest selected-head-equals-full-head
+  ;; the last head layer's out-projection and FFN only at the CLS and
+  ;; marker rows (the default; :selected-head false is the full layer):
+  ;; no other row of its output is read, so the logits and act logits
+  ;; must be the full layer's (laya-mlx's selected_head, exact
+  ;; dependency pruning)
+  (let [layers (slurp-edn (str golden-dir "/layers.edn"))
+        manifest (edn/read-string (slurp (str data-dir "/manifest.edn")))
+        cfg (edn/read-string (slurp (str data-dir "/config.edn")))
+        w (lev.model/load-weights manifest data-dir)
+        lens [74 64]
+        rows (vec (for [r [0 1]]
+                    (let [L (lens r)
+                          k (count (filter pos? (nth (layers :marker-mask) r)))]
+                      {:ids (vec (take L (map int (nth (layers :ids) r))))
+                       :att (vec (repeat L 1))
+                       :markers (vec (take k (nth (layers :marker-pos) r)))
+                       :marker-mask (vec (repeat k 1))
+                       :qtype (nth (layers :qtype) r)})))
+        close (fn [a b tol] (every? true? (map #(<= (Math/abs (- (double %1) (double %2)))
+                                                    (* tol (max 1.0 (Math/abs (double %2)))))
+                                               a b)))
+        full (lev.model/forward-batch w (assoc cfg :selected-head false) rows)
+        selected (lev.model/forward-batch w cfg rows)]
+    (is (= 2 (count selected)))
+    (doseq [r [0 1]]
+      (let [[lg act] (nth selected r)
+            [lg-f act-f] (nth full r)]
+        (is (= (count lg-f) (count lg)) (str "row " r " answers one logit per marker"))
+        (is (close lg lg-f 1e-4) (str "row " r " logits: selected " lg " full " lg-f))
+        (is (close act act-f 1e-4) (str "row " r " act logits: selected " act " full " act-f))))
+    (testing "a batch of one and a swapped batch"
+      (let [[[lg-b act-b]] (lev.model/forward-batch w cfg [(rows 1)])
+            swapped (lev.model/forward-batch w cfg [(rows 1) (rows 0)])]
+        (is (close lg-b (first (nth full 1)) 1e-4))
+        (is (close act-b (second (nth full 1)) 1e-4))
+        (is (close (first (second swapped)) (first (nth full 0)) 1e-4))
+        (is (close (first (first swapped)) (first (nth full 1)) 1e-4))))))

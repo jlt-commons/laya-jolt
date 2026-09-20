@@ -105,13 +105,17 @@ compile, the paired run 1.03x; lev's own before/after of the same code
 moved 288 → 304 ms. The noise floor here (`cpu,cpu`) is 1.00x ±2% over
 20 rounds. It is what decides whether the last item lands.
 
-## 4. Exact last-head-layer pruning (measured before landing)
+## 4. Exact last-head-layer pruning (landed, both backends)
 
 `run_variants.py`'s `selected_head`: only the CLS and marker rows of the
-last head layer are read downstream, so its Q, out-projection and FFN
-need only those 1+k rows (K/V still all rows). Exact dependency pruning;
-2.7–4.6% of modeled FLOPs; laya-mlx measured 1.03–1.08x paired. Lands
-only if `bench/paired.clj` puts its interval above 1 on lev.
+last head layer are read downstream, so its out-projection and FFN need
+only those 1+k rows (K/V, and so norm1, in_proj and attention, still
+all rows: their full-attention variant, the one that measured best).
+Exact dependency pruning; 2.7–4.6% of modeled FLOPs; laya-mlx measured
+1.03–1.08x paired. Here, `bench/paired.clj` put every interval above 1:
+1.015–1.025x on the C kernels (`lev.model/head-layer-selected!`),
+1.012–1.047x on MLX (`lev_mlx.c`'s `head_layer` with `sel`). On by
+default; `:selected-head false` keeps the whole layer.
 
 ## Not ported, with the evidence
 

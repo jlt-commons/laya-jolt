@@ -59,6 +59,7 @@ struct lev_mlx {
     mlx_array sc0w, sc0b, sc1w, sc1b, sc3w, sc3b;
     mlx_array act0w, act0b, act2w, act2b;
     int loaded;
+    int selected_head; /* the last head layer's out_proj + FFN on the CLS + marker rows only */
     char error[1024];
 };
 
@@ -235,7 +236,14 @@ static mlx_array encoder_layer(struct fwd *f, int i, mlx_array x, mlx_array mask
     return add(f, x, linear(f, act, w->wo_mlp, none));
 }
 
-static mlx_array head_layer(struct fwd *f, int li, mlx_array x, mlx_array mask, int B, int L) {
+/* One head layer on x [B, L, d]. With `sel` (flat row indices into the
+ * [B*L, d] view, S of them) only those rows of the output are computed:
+ * K and V need every row, so norm1, in_proj and attention run on all of
+ * them, and the out-projection, norm2 and the FFN on the S selected rows
+ * alone, answering [S, d]. Exact when nothing else reads the layer's
+ * output: the last layer, whose CLS and marker rows are all the scorer
+ * and the act head take (laya-mlx's selected_head). */
+static mlx_array head_layer(struct fwd *f, int li, mlx_array x, mlx_array mask, int B, int L, mlx_array sel) {
     struct lev_mlx *h = f->h;
     struct head_layer *w = &h->head[li];
     int H = h->hidden / 64 > 0 ? h->hidden / 64 : 1, hd = h->hidden / H;
@@ -245,6 +253,11 @@ static mlx_array head_layer(struct fwd *f, int li, mlx_array x, mlx_array mask, 
     mlx_array o = sdpa(f, q, k, v, 1.0f / sqrtf((float)hd), mask);
     int perm[4] = {0, 2, 1, 3}, flat[3] = {B, L, h->hidden};
     o = reshape(f, transpose_axes(f, o, perm, 4), flat, 3);
+    if (sel.ctx) {
+        int rows[2] = {B * L, h->hidden};
+        o = take(f, reshape(f, o, rows, 2), sel, 0);
+        x = take(f, reshape(f, x, rows, 2), sel, 0);
+    }
     x = add(f, x, linear(f, o, w->out_w, w->out_b));
     mlx_array n2 = layer_norm(f, x, w->n2w, w->n2b, 1e-5f);
     mlx_array l1 = maximum(f, linear(f, n2, w->l1w, w->l1b), scalar(f, 0.0f, h->dtype)); /* ReLU */
@@ -269,6 +282,7 @@ struct lev_mlx *lev_mlx_new(int hidden, int layers, int heads, int head_dim, int
     h->rope_full = rope_full; h->rope_local = rope_local; h->norm_eps = norm_eps;
     for (int i = 0; i < layers; i++) h->sliding[i] = sliding[i];
     h->dtype = half ? MLX_FLOAT16 : MLX_FLOAT32;
+    h->selected_head = 1;
     bool gpu = false;
     mlx_metal_is_available(&gpu);
     h->s = gpu ? mlx_default_gpu_stream_new() : mlx_default_cpu_stream_new();
@@ -292,6 +306,7 @@ int lev_mlx_gpu(struct lev_mlx *h) {
     return t == MLX_GPU;
 }
 int lev_mlx_half(struct lev_mlx *h) { return h && h->dtype == MLX_FLOAT16; }
+void lev_mlx_set_selected_head(struct lev_mlx *h, int on) { if (h) h->selected_head = on; }
 
 const char *lev_mlx_version(void) {
 #ifdef LEV_MLX_BUILD
@@ -459,25 +474,38 @@ int lev_mlx_forward(struct lev_mlx *h, const int32_t *ids, const uint8_t *att, i
         x = encoder_layer(f, i, x, h->sliding[i] ? local : full, B, L);
     x = layer_norm(f, x, h->final_norm, none, h->norm_eps);
 
-    /* head */
-    x = add(f, x, expand_dims(f, take(f, h->type_emb, qtype_a, 0), 1));
-    for (int i = 0; i < h->head_layers && !f->failed; i++)
-        x = head_layer(f, i, x, full, B, L);
-
-    /* the scorer at the markers: rows b*L + pos of the flat [B*L, d] */
-    int32_t *flat_idx = malloc((size_t)B * kmax * sizeof *flat_idx);
+    /* the rows the scorer and the act head read, in the flat [B*L, d]
+     * view: each row's CLS then its kmax marker slots (an unused slot
+     * points at the CLS row; its logit is masked below). With the
+     * selected head, the last head layer answers just these rows, in
+     * this order: [B*(1+kmax), d]. */
+    int span = 1 + kmax;
+    int32_t *flat_idx = malloc((size_t)B * span * sizeof *flat_idx);
     if (!flat_idx) { release(f); set_error(h, "forward: out of memory"); return -1; }
-    for (int b = 0; b < B; b++)
+    for (int b = 0; b < B; b++) {
+        flat_idx[b * span] = b * L;
         for (int k = 0; k < kmax; k++) {
             int32_t p = marker_pos[b * kmax + k];
-            flat_idx[b * kmax + k] = b * L + (p > 0 ? p : 0);
+            flat_idx[b * span + 1 + k] = b * L + (p > 0 ? p : 0);
         }
-    int bkn[1] = {B * kmax};
-    mlx_array idx = data(f, flat_idx, bkn, 1, MLX_INT32);
+    }
+    int bsn[1] = {B * span};
+    mlx_array sel = data(f, flat_idx, bsn, 1, MLX_INT32);
     free(flat_idx);
-    int flat_shape[2] = {B * L, d};
-    mlx_array hflat = reshape(f, x, flat_shape, 2);
-    mlx_array markers = take(f, hflat, idx, 0); /* [B*kmax, d] */
+
+    /* head */
+    x = add(f, x, expand_dims(f, take(f, h->type_emb, qtype_a, 0), 1));
+    for (int i = 0; i < h->head_layers && !f->failed; i++) {
+        int last = i == h->head_layers - 1;
+        x = head_layer(f, i, x, full, B, L, h->selected_head && last ? sel : (mlx_array){0});
+    }
+    /* x is now [B*(1+kmax), d] (selected) or [B, L, d]: bring both to the
+     * selected rows, [B, 1+kmax, d] */
+    int flat_shape[2] = {B * L, d}, sel_shape[3] = {B, span, d};
+    mlx_array hsel = h->selected_head ? x : take(f, reshape(f, x, flat_shape, 2), sel, 0);
+    hsel = reshape(f, hsel, sel_shape, 3);
+    int m0[3] = {0, 1, 0}, m1[3] = {B, span, d}, m2[3] = {1, 1, 1}, bkd[2] = {B * kmax, d};
+    mlx_array markers = reshape(f, slice(f, hsel, m0, m1, m2, 3), bkd, 2); /* [B*kmax, d] */
     mlx_array sc = layer_norm(f, markers, h->sc0w, h->sc0b, 1e-5f);
     sc = gelu(f, linear(f, sc, h->sc1w, h->sc1b), h->dtype);
     sc = linear(f, sc, h->sc3w, h->sc3b); /* [B*kmax, 1] */
@@ -500,7 +528,7 @@ int lev_mlx_forward(struct lev_mlx *h, const int32_t *ids, const uint8_t *att, i
     mlx_array feats = stack(f, fv, 1); /* [B, 4] */
     mlx_vector_array_free(fv);
     int c0[3] = {0, 0, 0}, c1[3] = {B, 1, d}, c2[3] = {1, 1, 1}, bd[2] = {B, d};
-    mlx_array cls = astype(f, reshape(f, slice(f, x, c0, c1, c2, 3), bd, 2), MLX_FLOAT32);
+    mlx_array cls = astype(f, reshape(f, slice(f, hsel, c0, c1, c2, 3), bd, 2), MLX_FLOAT32);
     mlx_array pooled_v[2] = {cls, feats};
     mlx_vector_array pv = mlx_vector_array_new_data(pooled_v, 2);
     mlx_array pooled = astype(f, concat(f, pv, 1), h->dtype); /* [B, d+4] */

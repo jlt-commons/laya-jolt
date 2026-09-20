@@ -46,7 +46,7 @@
                ;; calls (lev.sequence/prefix-cache); the map copies that
                ;; with-limits and with-calibration make share it
                :prefix-cache (seq/prefix-cache)}
-        limits (dissoc limits :name :backend :dtype :calibration)]
+        limits (dissoc limits :name :backend :dtype :calibration :selected-head)]
     (if (seq limits) (with-limits agent limits) agent)))
 
 (defn load-agent

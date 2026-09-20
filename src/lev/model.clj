@@ -160,22 +160,53 @@
           [##-Inf ##-Inf]
           xs))
 
-(defn head-attention
-  "torch MultiheadAttention (in_proj/out_proj, biased) with key-padding
-  mask, on the stacked rows x [B*L x d] -> [B*L x d] (the workspace's
-  :proj); alloweds is one [L x L] padding mask per row. Same math as the
-  encoder block but biased, without rope and full-mask-only."
+(defn- head-context
+  "torch MultiheadAttention's in_proj + attention with the key-padding
+  mask, before out_proj: the stacked rows x [B*L x d] -> the context
+  [B*L x d] (the workspace's :ctx); alloweds is one [L x L] padding mask
+  per row. Same math as the encoder block but biased, without rope and
+  full-mask-only."
   [w prefix x alloweds cfg ws]
   (let [n (first (t/shape x))
         d (:hidden-size cfg)
-        qkv (t/mmul! (:qkv ws) x (w (str prefix ".self_attn.in_proj_weight")))
-        _ (add-bias! (t/ptr qkv) (t/ptr (w (str prefix ".self_attn.in_proj_bias")))
-                     (long n) (long (* 3 d)))
-        ctx (attention-rows! cfg qkv #(nth alloweds %) nil -1 ws)
-        out (t/mmul! (:proj ws) ctx (w (str prefix ".self_attn.out_proj.weight")))]
+        qkv (t/mmul! (:qkv ws) x (w (str prefix ".self_attn.in_proj_weight")))]
+    (add-bias! (t/ptr qkv) (t/ptr (w (str prefix ".self_attn.in_proj_bias")))
+               (long n) (long (* 3 d)))
+    (attention-rows! cfg qkv #(nth alloweds %) nil -1 ws)))
+
+(defn- out-proj!
+  "The head's out_proj (biased) on the n context rows ctx, into out [n x d]."
+  [w prefix out ctx cfg]
+  (let [n (first (t/shape ctx))]
+    (t/mmul! out ctx (w (str prefix ".self_attn.out_proj.weight")))
     (add-bias! (t/ptr out) (t/ptr (w (str prefix ".self_attn.out_proj.bias")))
-               (long n) (long d))
+               (long n) (long (:hidden-size cfg)))
     out))
+
+(defn head-attention
+  "torch MultiheadAttention (in_proj/out_proj, biased) with key-padding
+  mask, on the stacked rows x [B*L x d] -> [B*L x d] (the workspace's :proj)."
+  [w prefix x alloweds cfg ws]
+  (out-proj! w prefix (:proj ws) (head-context w prefix x alloweds cfg ws) cfg))
+
+(defn- head-ffn!
+  "norm2 -> linear1 -> ReLU -> linear2 of head layer `prefix` on the n rows
+  x2, the result x2 + ffn into out [n x d]; the workspace's :norm, :ff
+  and :mo hold the intermediates (their first n rows)."
+  [w prefix out x2 cfg ws]
+  (let [n (first (t/shape x2))
+        d (:hidden-size cfg)
+        n2 (t/layernorm! (t/rows (:norm ws) 0 n) x2 (w (str prefix ".norm2.weight"))
+                         (w (str prefix ".norm2.bias")) 1e-5)
+        l1 (t/mmul! (t/rows (t/reshape (:ff ws) [(* (:B ws) (:L ws)) (* 4 d)]) 0 n) n2
+                    (w (str prefix ".linear1.weight")))
+        _ (add-bias! (t/ptr l1) (t/ptr (w (str prefix ".linear1.bias")))
+                     (long n) (long (* 4 d)))
+        _ (t/relu! l1)
+        l2 (t/mmul! (t/rows (:mo ws) 0 n) l1 (w (str prefix ".linear2.weight")))
+        _ (add-bias! (t/ptr l2) (t/ptr (w (str prefix ".linear2.bias")))
+                     (long n) (long d))]
+    (t/add-scaled! out x2 l2 1.0)))
 
 (defn head-layer!
   "One torch TransformerEncoderLayer, norm_first=true, ReLU FF, biased LN,
@@ -185,23 +216,34 @@
    (head-layer! w cfg li x alloweds
                 (workspace cfg (count alloweds) (quot (first (t/shape x)) (count alloweds)))))
   ([w cfg li x alloweds ws]
-   (let [n (first (t/shape x))
-         d (:hidden-size cfg)
-         prefix (str "head.layers." li)
+   (let [prefix (str "head.layers." li)
          n1 (t/layernorm! (:norm ws) x (w (str prefix ".norm1.weight"))
                           (w (str prefix ".norm1.bias")) 1e-5)
          attn (head-attention w prefix n1 alloweds cfg ws)
-         x2 (t/add-scaled! (:h2 ws) x attn 1.0)
-         n2 (t/layernorm! (:norm ws) x2 (w (str prefix ".norm2.weight"))
-                          (w (str prefix ".norm2.bias")) 1e-5)
-         l1 (t/mmul! (t/reshape (:ff ws) [n (* 4 d)]) n2 (w (str prefix ".linear1.weight")))
-         _ (add-bias! (t/ptr l1) (t/ptr (w (str prefix ".linear1.bias")))
-                      (long n) (long (* 4 d)))
-         _ (t/relu! l1)
-         l2 (t/mmul! (:mo ws) l1 (w (str prefix ".linear2.weight")))
-         _ (add-bias! (t/ptr l2) (t/ptr (w (str prefix ".linear2.bias")))
-                      (long n) (long d))]
-     (t/add-scaled! (next-residual ws x) x2 l2 1.0))))
+         x2 (t/add-scaled! (:h2 ws) x attn 1.0)]
+     (head-ffn! w prefix (next-residual ws x) x2 cfg ws))))
+
+(defn head-layer-selected!
+  "The last head layer, its output only at the rows `sel` (flat indices
+  into the stacked x [B*L x d]: each row's CLS and markers, all the
+  scorer and the act head read) -> [S x d] in that order. K and V need
+  every row, so norm1, in_proj and attention run on all of them; the
+  out-projection, norm2 and the FFN (9 of the layer's 12 d^2 a row) run
+  on the S selected rows alone. Exact: no other row of this layer's
+  output is read (laya-mlx's selected_head, its full-attention variant,
+  measured 1.03-1.08x there, 1.015-1.025x here). forward-batch's default;
+  :selected-head false in cfg turns it off."
+  [w cfg li x alloweds ws sel]
+  (let [d (:hidden-size cfg)
+        S (count sel)
+        prefix (str "head.layers." li)
+        n1 (t/layernorm! (:norm ws) x (w (str prefix ".norm1.weight"))
+                         (w (str prefix ".norm1.bias")) 1e-5)
+        ctx (head-context w prefix n1 alloweds cfg ws)
+        ids (t/from-ints sel)
+        attn (out-proj! w prefix (t/rows (:proj ws) 0 S) (t/gather ctx ids S d) cfg)
+        x2 (t/add-scaled! (t/rows (:h2 ws) 0 S) (t/gather x ids S d) attn 1.0)]
+    (head-ffn! w prefix (t/rows (next-residual ws x) 0 S) x2 cfg ws)))
 
 (defn scorer
   "LN(bias) -> Linear+GELU -> Linear(+bias), on [n x d] marker rows.
@@ -267,11 +309,28 @@
             h (encode-batch w cfg ids att masks ws)
             _ (t/add-qtype! h (w "type_emb.weight")
                             (t/from-ints (mapcat #(repeat L (:qtype %)) rows)) (* B L) d)
-            h2 (reduce (fn [hh li] (head-layer! w cfg li hh (mapv first masks) ws))
-                       h (range (:head-layers cfg)))
+            alloweds (mapv first masks)
+            nh (:head-layers cfg)
+            ;; the rows the scorer and the act head read: each row's CLS,
+            ;; then its markers; the last head layer answers those rows
+            ;; alone, in this order (head-layer-selected!: 1.5-2.5% of a
+            ;; call, bench/README), unless :selected-head is false
+            selected? (and (not= false (:selected-head cfg)) (pos? nh))
+            cls-of (fn [b] (* b L))
+            marker-of (fn [b m] (+ (* b L) (max 0 (long m))))
+            sel (vec (mapcat (fn [b {:keys [markers]}] (cons (cls-of b) (map #(marker-of b %) markers)))
+                             (range) rows))
+            h2 (if selected?
+                 (head-layer-selected! w cfg (dec nh)
+                                       (reduce (fn [hh li] (head-layer! w cfg li hh alloweds ws)) h (range (dec nh)))
+                                       alloweds ws sel)
+                 (reduce (fn [hh li] (head-layer! w cfg li hh alloweds ws)) h (range nh)))
+            ;; where each row's CLS and markers sit in h2
+            starts (vec (reductions + 0 (map #(inc (count (:markers %))) rows)))
+            cls-row (fn [b] (if selected? (nth starts b) (cls-of b)))
+            marker-row (fn [b j] (if selected? (+ (nth starts b) 1 j) (marker-of b (nth (:markers (nth rows b)) j))))
             ;; every row's markers through the scorer at once
-            kpos (vec (mapcat (fn [b {:keys [markers]}]
-                                (map #(+ (* b L) (max 0 (long %))) markers))
+            kpos (vec (mapcat (fn [b {:keys [markers]}] (map #(marker-row b %) (range (count markers))))
                               (range) rows))
             lg (t/to-floats (scorer w (t/gather h2 (t/from-ints kpos) (count kpos) d)))]
         (loop [b 0, at 0, out []]
@@ -282,7 +341,7 @@
                   lgv (mapv (fn [v msk] (if (pos? (long msk)) v -1e4))
                             (subvec lg at (+ at k)) marker-mask)
                   feats (answer-features (t/from-floats lgv) marker-mask)
-                  pooled (t/gather h2 (t/from-ints [(* b L)]) 1 d)]
+                  pooled (t/gather h2 (t/from-ints [(cls-row b)]) 1 d)]
               (recur (inc b) (+ at k)
                      (conj out [lgv (t/to-floats (act-head w pooled feats))])))))))))
 

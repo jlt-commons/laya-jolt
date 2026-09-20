@@ -37,7 +37,7 @@
       (is (= "english" (:name a)))
       (is (fn? (:forward a)))
       (is (fn? (:close a)))
-      (is (= #{:p :gpu? :dtype} (set (keys (:w a)))) ":w is the device handle, not tensors in the jolt heap")
+      (is (= #{:p :gpu? :dtype :selected-head} (set (keys (:w a)))) ":w is the device handle, not tensors in the jolt heap")
       (is (:gpu? a) "on the GPU")
       (is (str/starts-with? (mlx/version) "mlx-c"))
       (is (= :f16 (:dtype @f16))))))
@@ -90,6 +90,15 @@
               swapped ((:forward @f32) (:w @f32) cfg [(rows 1) (rows 0)])]
           (is (close lg-b (first (nth gpu 1)) 1e-5))
           (is (close (first (second swapped)) (first (nth gpu 0)) 1e-5))))
+      (testing "the full last head layer (:selected-head false) answers the same"
+        (let [whole (mlx/load-agent data-dir {:name "english" :selected-head false})
+              out ((:forward whole) (:w whole) cfg rows)]
+          (is (false? (:selected-head (:w whole))))
+          (is (true? (:selected-head (:w @f32))))
+          (doseq [r [0 1]]
+            (is (close (first (nth out r)) (first (nth gpu r)) 1e-5) (str "row " r))
+            (is (close (second (nth out r)) (second (nth gpu r)) 1e-5) (str "row " r " act")))
+          ((:close whole) whole)))
       (testing "f16: the same argmax, values within 1e-2"
         (let [half ((:forward @f16) (:w @f16) cfg rows)
               argmax (fn [xs] (first (apply max-key second (map-indexed vector xs))))]

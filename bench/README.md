@@ -251,3 +251,23 @@ interleaved), a custom Metal GELU kernel (no consistent win over the
 compiled graph), 8/4-bit weights (no speedup at these shapes and 62/63,
 50/63 fixture agreement), low-rank weights (84% Frobenius error at the
 rank a 10x needs).
+
+## The last head layer, pruned to the rows that are read
+
+Only each row's CLS and marker rows of the last head layer reach the
+scorer and the act head, so its out-projection, second norm and FFN (9
+of the layer's 12 d² a row) run on those 1+k rows instead of all L
+(laya-mlx's `selected_head`; exact dependency pruning, the golden batch
+and the oracle answers unchanged). Interleaved against the whole layer,
+20 rounds:
+
+| call | C kernels: whole → pruned | paired speedup | MLX f32: whole → pruned | paired speedup |
+|---|---|---|---|---|
+| 4 questions, short state | 264 → 261 ms | 1.015x [1.012, 1.016] | 68 → 65 ms | 1.047x [1.017, 1.062] |
+| 4 questions, long state | 1,105 → 1,078 ms | 1.025x [1.023, 1.027] | 314 → 309 ms | 1.014x [1.014, 1.016] |
+| 1 question, long state | 365 → 359 ms | 1.018x [1.014, 1.021] | 135 → 132 ms | 1.012x [1.007, 1.034] |
+
+Small, every interval above 1, and it costs nothing: on by default on
+both backends (`:selected-head false` in the prepared config or, for
+lev.mlx, the loader's limits keeps the whole layer; `bench/paired.clj
+--candidates fullhead,cpu` / `mlxfull,mlx` is the comparison).

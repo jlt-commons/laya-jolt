@@ -33,6 +33,7 @@
 (ffi/defcfn complete* "lev_mlx_complete" [:pointer :pointer :int] :int)
 (ffi/defcfn forward* "lev_mlx_forward"
   [:pointer :pointer :pointer :int :int :pointer :pointer :int :pointer :pointer :pointer] :int :blocking)
+(ffi/defcfn set-selected-head* "lev_mlx_set_selected_head" [:pointer :int] :void)
 (ffi/defcfn free* "lev_mlx_free" [:pointer] :void)
 (ffi/defcfn memory* "lev_mlx_memory" [:int] :int64)
 
@@ -56,9 +57,11 @@
 
 (defn load-model
   "The model in a prepared data directory, on the device: {:p handle :gpu?
-  :dtype}. cfg and manifest as lev.agent/agent-shell reads them. Throws
-  {:type :model-unavailable} when the native is missing or a tensor is."
-  [data-dir cfg manifest dtype]
+  :dtype :selected-head}. cfg and manifest as lev.agent/agent-shell reads
+  them; selected-head? prunes the last head layer to the CLS + marker rows
+  (exact; lev.model's default too). Throws {:type :model-unavailable}
+  when the native is missing or a tensor is."
+  [data-dir cfg manifest dtype selected-head?]
   (when-not (available?) (unavailable data-dir))
   (let [{:keys [hidden-size num-layers num-heads head-dim intermediate window head-layers vocab-size
                 rope-full rope-local norm-eps layer-types]} cfg
@@ -82,7 +85,10 @@
                     (let [buf (ffi/alloc a 256)]
                       (when (zero? (complete* h buf 256)) (ffi/ptr->string buf))))]
       (when missing (fail h data-dir (str "the manifest has no " missing))))
-    {:p h :gpu? (= 1 (gpu* h)) :dtype dtype}))
+    ;; the last head layer's out-projection and FFN on the CLS + marker
+    ;; rows only, as lev.model's forward-batch does
+    (set-selected-head* h (int (if selected-head? 1 0)))
+    {:p h :gpu? (= 1 (gpu* h)) :dtype dtype :selected-head selected-head?}))
 
 (defn free!
   "Give the model back to the device."
@@ -136,14 +142,17 @@
 (defn load-agent
   "An encoder agent on MLX for a prepared data directory: lev.agent's
   shell (limits, name) with the weights on the device at :dtype (:f32
-  default, :f16) and this namespace's forward. :close (the router calls
-  it on eviction) frees the model. Throws {:type :model-unavailable}."
+  default, :f16) and this namespace's forward; :selected-head false in
+  the limits (or the prepared config) keeps the last head layer whole.
+  :close (the router calls it on eviction) frees the model. Throws
+  {:type :model-unavailable}."
   ([data-dir] (load-agent data-dir nil))
   ([data-dir limits]
    (when-not (available?) (unavailable data-dir))
    (let [dtype (or (:dtype limits) :f32)
          shell (ag/agent-shell data-dir limits)
-         model (load-model data-dir (:cfg shell) (:manifest shell) dtype)
+         selected? (not= false (:selected-head limits (:selected-head (:cfg shell))))
+         model (load-model data-dir (:cfg shell) (:manifest shell) dtype selected?)
          freed (atom false)]
      (assoc shell
             :backend :mlx :dtype dtype :gpu? (:gpu? model)

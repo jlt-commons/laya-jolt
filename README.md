@@ -637,6 +637,9 @@ jolt -M bench/workflow.clj                                        # a 4-question
 jolt -M bench/paired.clj --candidates cpu,mlx                     # two agents interleaved on the same inputs: paired speedup with a 95% interval
 ```
 
+The last layer of the decision head computes only the rows the scorer
+reads (each question's CLS and option markers), on either backend: exact,
+1.5–2.5% of a call on the C kernels, 1–5% on MLX (bench/README.md).
 A call tokenizes its state once for all its questions, and keeps every
 question's own prefix (`[CLS] question [SEP] [MASK] options [SEP]`) in a
 128-entry cache per loaded model, so a workflow's fixed questions on a
