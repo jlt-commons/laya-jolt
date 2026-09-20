@@ -43,6 +43,7 @@ chat template.
 | **lev thinker**, thinking, sampled (temperature 1.0) | 2.5B | 91.0% (131) | 91.3% | | 5,388 mean, 3,926 median (Metal); 342 tokens |
 | **lev thinker**, thinking, greedy (the default) | 2.5B | **95.1% (137)** | 95.5% | | 4,716 mean, 3,084 median (Metal); 369 tokens |
 | [localjev](https://github.com/githubnext/localjev) + DiffusionGemma 26B-A4B 4-bit on oMLX 0.6.4 | 26B (4B active), 16.6 GB | 91.0% (131) | 90.0% | | 5,192 mean, 5,262 median (Metal) |
+| lev thinker, Qwen3-4B-Thinking-2507 Q8 (unsloth GGUF), greedy, 4,096-token budget | 4B | 94.4% (136) | 95.3% | | 42,543 mean, 41,216 median (Metal); 1,883 tokens |
 
 The lev thinker is the same model and the same llama.cpp inside
 `lev-server` (`lev.think`): the prompt is built by lev, the thought is
@@ -84,6 +85,35 @@ the routing task by 15 points, at 125 ms on a CPU against 150 ms on a GPU
 (~560 ms on a CPU), one forward for a whole workflow instead of one prompt
 per question, with calibrated confidence. The thinker's thinking earns
 its seconds on the reading-comprehension and reasoning cases.
+
+## Candidates from RESEARCH-2026-09.md, measured
+
+- **Option-permutation averaging** (the note's #3; the encoder's answer
+  averaged over every rotation of the option list): 20 of 144 cases change
+  their argmax under rotation (14%, the same share nibzard measured on Jev).
+  Averaging moves `english` 61.1% → 63.9% and its ECE 0.101 → 0.082;
+  `typed-decisions` 66.7% → 66.0%. Three forwards per question, one batch.
+  Small and inconsistent.
+- **Neutral-state prior subtraction** (jevmlx's correction; score the
+  options against an empty state, subtract the log-odds): `english` 61.1%
+  → 54.9%, and combined with averaging 62.5%. An empty state is out of the
+  encoder's distribution; the correction hurts. Not worth it.
+- **Qwen3-4B-Thinking-2507 as the thinker** (#5): 94.4%, the same as
+  MiniCPM5-2B's 95.1%, at 13× the time (41 s a case, 1,883 thought tokens
+  against 369). The 2.5B model is the escalation tier.
+- **The gate on in-distribution traffic** (#4): the encoder's noul
+  confidence is `max(p, 1 − p)`, never below 0.5, and its BoolQ answers are
+  over-confident — at a 0.5 threshold every BoolQ case stays on the
+  encoder (72.5% right) where the thinker gets 90%; at 0.7 it still keeps
+  37 of 40. Choice and score confidences (1 − normalised entropy) behave:
+  at 0.5 the gate keeps 36/40 AG News (the encoder's best task) and 13/40
+  SST-5 (its worst). The gate needs a per-type threshold or a refit noul
+  temperature before it can be trusted on yes/no questions.
+- **Calibration** on authored144: encoder ECE 0.101 (typed-decisions
+  0.133), von 0.124, the thinker 0.039 — but 97% of the thinker's answers
+  come with confidence above 0.5, so its confidence cannot gate anything;
+  the encoder's can (88% of these adversarial cases sit below 0.5, 12% of
+  in-distribution AG News).
 
 What the numbers say:
 
