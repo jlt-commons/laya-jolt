@@ -219,7 +219,15 @@
     (let [[st b] (call h (req :get "/health"))]
       (is (= 200 st))
       (is (= {"status" "ok" "model" "lev" "loaded" ["english"] "thinkers" []
-              "workflows" ["demo" "email" "guard" "llm-router" "moderation" "security" "triage"]} b)))))
+              "workflows" ["demo" "email" "guard" "llm-router" "moderation" "security" "triage"]} b)))
+    (testing "ruuter 2: a segment is a segment"
+      ;; :name spans one segment, not the rest of the path (1.3.5's `.*` did)
+      (is (= 404 (first (call h (req :post "/v1/workflows/email/extra" :body "{}")))))
+      (is (= 404 (first (call h (req :post "/v1/patterns/gate/extra" :body "{}")))))
+      ;; empty segments are dropped, so a trailing slash reaches the route
+      (is (= 200 (first (call h (req :get "/health/")))))
+      (is (= 200 (first (call h (req :get "/v1/models/")))))
+      (is (= 405 (first (call h (req :get "/v1/systemone/"))))))))
 
 (deftest wire-order-is-preserved
   (testing "14 options and 9 questions keep their JSON order end to end"

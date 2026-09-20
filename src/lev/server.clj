@@ -416,8 +416,9 @@
 (def ^:private http-methods [:get :post :put :delete :patch :head :options])
 
 (defn- routes
-  "The ruuter route table. Every real route is followed by 405 entries for
-  the other methods on its path; anything else is the 404."
+  "The ruuter route table: the real routes, a 405 entry for every other
+  method on each of their paths, and the 404. ruuter 2 matches by
+  specificity and method, so the order of the vector carries nothing."
   [rt lock workflows api-key]
   (let [guard (fn [f] (fn [req] (if (authorized? req api-key) (f req) unauthorized)))
         json-in (fn [f allow-empty?]
@@ -450,7 +451,10 @@
   :workflows {name workflow} from lev.workflows/load-workflows."
   [rt {:keys [api-key workflows]}]
   (let [rt (if (router/router? rt) rt (router/preloaded rt))
-        table (routes rt (Object.) (or workflows {}) api-key)]
+        ;; compiled once: handed the raw vector, ruuter/route would look its
+        ;; trie up in a memoize cache on every request (hashing the table)
+        ;; and keep one trie per handler ever made
+        table (ruuter/compile-routes (routes rt (Object.) (or workflows {}) api-key))]
     (fn [req] (ruuter/route table req))))
 
 ;; --- server ----------------------------------------------------------------------
