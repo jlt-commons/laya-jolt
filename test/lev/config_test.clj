@@ -81,6 +81,18 @@
     (testing "values are integers whatever the source"
       (is (= {:max-len 700} (cfg/limits {:opts {} :env {} :config {:max-len "700"}} "english"))))))
 
+(deftest backend-and-dtype-ride-with-the-limits
+  (testing "config.edn :backend / :dtype for every checkpoint, :checkpoints for one, env and CLI over both"
+    (let [config {:backend "mlx" :checkpoints {"multilingual" {:backend "cpu" :dtype "f16"}}}]
+      (is (= {:backend :mlx} (cfg/limits {:opts {} :env {} :config config} "english")))
+      (is (= {:backend :cpu :dtype :f16} (cfg/limits {:opts {} :env {} :config config} "multilingual")))
+      (is (= {:backend :cpu :dtype :f32} (cfg/limits {:opts {} :env {"LEV_BACKEND" "cpu" "LEV_DTYPE" "f32"} :config config} "english")))
+      (is (= {:backend :mlx :dtype :f16} (cfg/limits {:opts {"--backend" "mlx" "--dtype" "f16"} :env {"LEV_BACKEND" "cpu"} :config config} "multilingual")))
+      (is (= {} (cfg/limits {:opts {} :env {} :config {}} "english")))))
+  (testing "only cpu and mlx, f32 and f16"
+    (is (thrown-with-msg? Exception #"backend" (cfg/limits {:opts {} :env {} :config {:backend "cuda"}} "english")))
+    (is (thrown-with-msg? Exception #"dtype" (cfg/limits {:opts {} :env {} :config {:dtype "bf16"}} "english")))))
+
 (deftest thinkers-from-config-cli-and-env
   (testing "config.edn :thinkers, names as strings, each entry with its model path"
     (is (= {"minicpm5" {:model "/m/MiniCPM5-2B-Q8_0.gguf" :thinking true :max-think-tokens 512}}

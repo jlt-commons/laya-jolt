@@ -217,3 +217,37 @@ jolt -M bench/paired.clj --candidates cpu,cpu --rounds 20
 Single rounds swing by 20%; twenty paired rounds pin the ratio to ±2%.
 Anything that changes the forward (a backend, a pruned layer) is measured
 here before it lands.
+
+## The MLX backend, measured (`--backend mlx`, mac)
+
+`jolt mlx` builds the encoders' GPU engine (lev.mlx over mlx-c, the
+same forward as the C kernels as one MLX graph). Interleaved against the
+C kernels with `bench/paired.clj --candidates cpu,mlx,mlx16 --rounds 20`
+on the M-series this tree is developed on, `english`:
+
+| call | cpu p50 | mlx f32 p50 | paired speedup | mlx f16 p50 | paired speedup |
+|---|---|---|---|---|---|
+| 4 questions, short state (53 tokens) | 270 ms | 68 ms | **3.98x** [3.85, 4.02] | 54 ms | **5.05x** [4.97, 5.07] |
+| 4 questions, long state (512 tokens a row) | 1,126 ms | 344 ms | **3.28x** [3.21, 3.46] | 276 ms | **4.07x** [3.97, 4.12] |
+| 1 question, long state | 373 ms | 142 ms | **2.62x** [2.53, 2.77] | 121 ms | **3.08x** [2.94, 3.15] |
+
+Accuracy, the same runners as above:
+
+| | authored144 | ECE | ms/case | trio | ECE | ms/case |
+|---|---|---|---|---|---|---|
+| cpu f32 | 61.1% (88) | 0.101 | 101 | 65.8% (79/120) | 0.161 | 118 |
+| mlx f32 | 61.1% (88) | 0.101 | 24 | 65.8% (79/120) | 0.161 | 29 |
+| mlx f16 | 61.8% (89) | 0.105 | 22 | 65.8% (79/120) | 0.161 | 25 |
+
+f32 is the C kernels' answer to the fourth decimal (lev.mlx-test holds
+the golden batch to 1e-4 and the README answers to the oracle); f16
+moves one authored144 case (in its favour, by luck) and probabilities by
+up to 1e-2. laya-mlx's own M3 Max numbers for the same architecture at
+f16 (13 ms a short single question, batch of one) are of the same order
+once its lighter per-call path is accounted for; lev's call carries the
+tokenizer (~1 ms a question), the calibration and the answer shaping.
+Not ported from laya-mlx, with its evidence: `mx.compile` (1.03x
+interleaved), a custom Metal GELU kernel (no consistent win over the
+compiled graph), 8/4-bit weights (no speedup at these shapes and 62/63,
+50/63 fixture agreement), low-rank weights (84% Frobenius error at the
+rank a 10x needs).

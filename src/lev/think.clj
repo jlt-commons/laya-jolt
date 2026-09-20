@@ -48,7 +48,9 @@
                      (let [m (llm/load (:model cfg) (select-keys cfg [:n-ctx :n-gpu-layers :threads :n-seq-max]))]
                        {:llm m
                         :decide (fn [prompt options opts] (llm/decide m prompt options opts))
-                        :count-tokens (fn [text] (llm/count-tokens m text))}))]
+                        :count-tokens (fn [text] (llm/count-tokens m text))
+                        ;; the router calls this when it evicts or unloads the thinker
+                        :close (fn [_] (llm/free! m))}))]
      (merge {:kind :thinker :name (or (:name cfg) "thinker") :cfg cfg} backing))))
 
 (defn- key-str [k] (if (keyword? k) (name k) (str k)))

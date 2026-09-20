@@ -117,12 +117,13 @@ switch. Another model family needs its own template, which lives in
 ```
 jolt kernels             # compile native/lev_kernels.c
 jolt llama               # clone + build llama.cpp (pinned tag) into native/liblev_llm.*, the thinker's native
+jolt mlx                 # mac: clone + build mlx-c (pinned tag) into native/liblev_mlx.*, the encoders' GPU backend
 jolt prepare             # every checkpoint under ../laya -> data/, data/typed-decisions, ...
 jolt -M:test             # parity suites vs golden/
 jolt -M:run demo         # README quickstart through the workflow runner
 jolt -M:serve            # HTTP API on http://127.0.0.1:8080
 jolt -M:calibrate --labels cases.jsonl --out calibration.edn   # refit an encoder's temperatures on your labeled traffic
-jolt binary              # standalone ./lev-server (kernels + llama.cpp linked in), self-tested against golden/
+jolt binary              # standalone ./lev-server (kernels + llama.cpp linked in, mlx too when built), self-tested against golden/
 ```
 
 `jolt -M:test` runs everything against whatever is prepared under `data/`.
@@ -169,7 +170,8 @@ lives in `$LEV_CONFIG_DIR`, else `$XDG_CONFIG_HOME/lev`, else
  :default-model "english"                               ; loaded at startup; content routing's fallback (an encoder or a thinker)
  :auto-task-detection false                             ; route typed-decisions question sets to that checkpoint
  :max-len 768 :head-max-len 192                         ; sequence limits for every checkpoint (see Context)
- :checkpoints {"multilingual" {:max-len 2048}}}         ; ... and per checkpoint, which wins
+ :backend "mlx" :dtype "f16"                            ; the encoders' engine: cpu (the C kernels) or mlx (Apple's GPU, jolt mlx), f32 or f16 (see Speed or accuracy)
+ :checkpoints {"multilingual" {:max-len 2048 :backend "cpu"}}}   ; ... and per checkpoint, which wins
 ```
 
 A server needs at least one model of either kind, and serves whatever is
@@ -192,6 +194,7 @@ or an unbuilt llm native, is a 503. `GET /v1/models` says which is which.
 | startup / fallback model | `--default-model NAME` | `LEV_DEFAULT_MODEL` | `:default-model` | `english` |
 | typed-decisions by question ids | `--auto-task-detection` | n/a | `:auto-task-detection` | off |
 | sequence limits | `--max-len N` `--head-max-len N` | `LEV_MAX_LEN` `LEV_HEAD_MAX_LEN` | `:max-len` `:head-max-len`, `:checkpoints {"name" {…}}` | the checkpoint's own (`rl_agent_config.json`) |
+| encoder engine | `--backend cpu\|mlx` `--dtype f32\|f16` | `LEV_BACKEND` `LEV_DTYPE` | `:backend` `:dtype`, `:checkpoints {"name" {…}}` | `cpu`, `f32` |
 | goldens (`--self-test`) | `--golden DIR` | `LEV_GOLDEN` | `:golden` | `golden` |
 
 `--workflows` and `LEV_WORKFLOWS` are the exception to "adds". They name
@@ -641,6 +644,34 @@ fresh state, or a game's questions every tick, cost no tokenization
 beyond the state's. On a 1.6k-token state that is 10% of a four-question
 call (bench/README.md); the answers do not change.
 
+### The MLX backend (mac)
+
+On Apple silicon the encoders can run on the GPU through MLX: `jolt mlx`
+builds the native, `--backend mlx` (or `LEV_BACKEND=mlx`, or `:backend
+"mlx"` in config.edn, per checkpoint under `:checkpoints`) runs every
+encoder forward on it, and everything else — sequence building,
+calibration, constraints, `debias`, the thinkers, the API — is the same
+code. The router keeps one engine per checkpoint, so `:checkpoints
+{"multilingual" {:backend "cpu"}}` mixes them.
+
+- `--dtype f32` (the default) holds the weights on the device at full
+  precision: the answers are the C kernels' to the fourth decimal, the
+  golden tests hold it there, and authored144 and the trio reproduce
+  their CPU accuracy and ECE exactly. Measured interleaved against the C
+  kernels on an M-series (bench/paired.clj): **4.0x** on a short
+  four-question call (270 → 68 ms), 3.3x on a long one (1,130 → 340 ms),
+  2.6x on one long question; authored144 101 → 24 ms a case.
+- `--dtype f16` halves the memory (0.8 GB a checkpoint) and is another
+  20–25% faster (54 ms, 276 ms, 22 ms a case). The chosen answers agree
+  (authored144 89/144 against f32's 88, the trio identical), the
+  probabilities drift by up to 1e-2, so it is off the golden path: use it
+  where the label matters and the fourth decimal does not.
+- Without the native (linux, or `jolt mlx` not run) a request for the
+  mlx backend is a clear `:model-unavailable` error, not a fallback.
+  MLX loads its Metal kernels from `mlx.metallib` next to the binary
+  holding it: `native/mlx.metallib` for `jolt run` / `test` (the build
+  puts it there), and beside `lev-server` for a `jolt build`.
+
 A hosted generative decision API wins through its reasoning budget. A
 generative model answering without thinking does no better
 than an NLI encoder, `thinking` sets the budget, and `escalate`
@@ -669,6 +700,18 @@ entries, and the build task branches on OS.
   `native/frameworks/`. That is how a `deps.edn` `:static {:lib}` can
   name a framework, and the binary ends up depending only on system
   frameworks.
+- **MLX** (mac only): `native/liblev_mlx.dylib` plus `liblev_mlx.a` and
+  `native/mlx.metallib`, built by `jolt mlx`. It clones
+  [mlx-c](https://github.com/ml-explore/mlx-c), Apple's C binding for
+  MLX, at its pinned tag into `native/mlx-c` (its cmake fetches MLX
+  itself at the matching tag) and builds both static behind
+  `native/lev_mlx.c`, a flat C face jolt.ffi binds as `lev.mlx`: the
+  whole encoder forward is built there as one lazy MLX graph and
+  evaluated once per batch, the weights read from `data/`'s own f32
+  files. Optional: without it the encoders run on the C kernels. The
+  static link adds the QuartzCore framework to llama's set, and the
+  binary needs `mlx.metallib` (the precompiled Metal kernels, 100 MB)
+  beside it at runtime.
 - **ICU**: `libicucore.dylib` on mac, whose system dylib leaves the
   symbols unguarded, and `libicuuc.so.<ver>` on linux. The tokenizers
   call `unorm2` for NFC and the `u_charType` / `u_isUWhiteSpace`

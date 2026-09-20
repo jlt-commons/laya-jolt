@@ -3,9 +3,11 @@
   answers, as the checkpoints' own Python package computes them
   (temperature calibration, entropy confidence, the `action` extension)."
   (:require [clojure.edn :as edn]
+            [jolt.ffi :as ffi]
             [lev.constraints :as c]
             [lev.model :as m]
             [lev.sequence :as seq]
+            [lev.tensors :as t]
             [lev.tokenizer :as tk]))
 
 (defn with-limits
@@ -27,23 +29,40 @@
         (update :cfg assoc :max-len max-len :head-max-len head-max-len)
         (assoc :trained-max-len (or (:trained-max-len agent) (:max-len cfg))))))
 
+(defn agent-shell
+  "Everything of an encoder agent but its weights: config, tokenizer,
+  manifest, the prefix cache, `limits` ({:max-len :head-max-len}, see
+  with-limits) over the checkpoint's, and :name, what the answers report
+  as \"model\" (the router passes the checkpoint's name; alone, an agent is
+  \"encoder\"). A backend completes it with :w (its weights, whatever it
+  holds them in) and :forward, its lev.model/forward-batch."
+  [data-dir limits]
+  (let [manifest (edn/read-string (slurp (str data-dir "/manifest.edn")))
+        cfg (edn/read-string (slurp (str data-dir "/config.edn")))
+        tok (tk/load (str data-dir "/tokenizer.edn"))
+        agent {:kind :encoder :name (or (:name limits) "encoder") :backend :cpu :dtype :f32
+               :cfg cfg :tok tok :manifest manifest :data-dir data-dir :trained-max-len (:max-len cfg)
+               ;; the questions' prefixes, tokenized once and kept across
+               ;; calls (lev.sequence/prefix-cache); the map copies that
+               ;; with-limits and with-calibration make share it
+               :prefix-cache (seq/prefix-cache)}
+        limits (dissoc limits :name :backend :dtype :calibration)]
+    (if (seq limits) (with-limits agent limits) agent)))
+
 (defn load-agent
-  "Load config + tokenizer + all weights from data-dir; `limits`
-  ({:max-len :head-max-len}, see with-limits) override the checkpoint's,
-  and its :name is what the answers report as \"model\" (the router passes
-  the checkpoint's name; alone, an agent is \"encoder\")."
+  "Load config + tokenizer + all weights from data-dir onto the C kernels;
+  `limits` as agent-shell's. The weights are malloc'd: :close gives them
+  back (the router calls it when the agent is evicted or unloaded)."
   ([data-dir] (load-agent data-dir nil))
   ([data-dir limits]
-   (let [manifest (edn/read-string (slurp (str data-dir "/manifest.edn")))
-         cfg (edn/read-string (slurp (str data-dir "/config.edn")))
-         tok (tk/load (str data-dir "/tokenizer.edn"))
-         agent {:kind :encoder :name (or (:name limits) "encoder")
-                :cfg cfg :tok tok :w (m/load-weights manifest data-dir) :trained-max-len (:max-len cfg)
-                ;; the questions' prefixes, tokenized once and kept across
-                ;; calls (lev.sequence/prefix-cache); the map copies that
-                ;; with-limits and with-calibration make share it
-                :prefix-cache (seq/prefix-cache)}]
-     (if (seq (dissoc limits :name)) (with-limits agent (dissoc limits :name)) agent))))
+   (let [agent (agent-shell data-dir limits)
+         freed (atom false)]
+     (assoc agent
+            :w (m/load-weights (:manifest agent) data-dir)
+            :forward m/forward-batch
+            ;; once: a second close (the same map in two routers) must not double-free
+            :close (fn [a] (when (compare-and-set! freed false true)
+                             (doseq [t (vals (:w a))] (ffi/free (t/ptr t)))))))))
 
 (defn- qget
   "Question defs may carry keyword keys (Clojure literals) or string keys
@@ -261,6 +280,9 @@
   did not fit)}. What system-one calibrates and lev.calibrate refits on."
   [agent state questions]
   (let [{:keys [cfg tok w prefix-cache]} agent
+        ;; the backend's forward over the prepared rows: the C kernels
+        ;; (lev.model/forward-batch) unless the agent brought its own
+        forward (:forward agent m/forward-batch)
         ;; the state is tokenized once for every question in the call (46
         ;; ms at 1.4k tokens, the same for each question before); a
         ;; question's prefix comes from the agent's cache when it has been
@@ -283,7 +305,7 @@
         ;; the questions share every gemm of the forward, in batches of at
         ;; most max-batch rows so the workspace stays a few hundred MB
         outputs (mapcat (fn [chunk]
-                          (m/forward-batch w cfg
+                          (forward w cfg
                                            (mapv (fn [{:keys [ids markers qtype]}]
                                                    {:ids ids :att (vec (repeat (count ids) 1))
                                                     :markers markers :marker-mask (vec (repeat (count markers) 1))

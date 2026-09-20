@@ -7,11 +7,16 @@
 ;;   jolt -M bench/triad.clj english
 ;;   jolt -M bench/triad.clj minicpm5 false           # a thinker, thinking off
 ;;   jolt -M bench/triad.clj minicpm5 true
+;;   jolt -M bench/triad.clj english --backend mlx --dtype f16
 (require '[lev.agent :as ag] '[lev.router :as router] '[lev.config :as cfg] '[lev.json :as json] '[clojure.string :as str])
 (def cases (mapv json/read-str (remove str/blank? (str/split-lines (slurp "bench/data/triad120.jsonl")))))
-(def model (or (first *command-line-args*) "english"))
-(def thinking (when (second *command-line-args*) (= "true" (second *command-line-args*))))
-(def ctx (cfg/context (cfg/parse-args (drop 2 *command-line-args*))))
+;; positionals: model [thinking]; flags (--backend, --dtype, --data, --max-len ...)
+;; anywhere. (A blind (drop 2 args) used to eat the first flag when there
+;; was no thinking positional.)
+(def opts (cfg/parse-args *command-line-args*))
+(def model (or (first (:args opts)) "english"))
+(def thinking (when (second (:args opts)) (= "true" (second (:args opts)))))
+(def ctx (cfg/context opts))
 (def rt (router/make-router {:data (cfg/setting ctx "--data" "LEV_DATA" :data "data")
                              :thinkers (cfg/thinkers ctx)
                              :checkpoints (into {} (map (fn [n] [n (cfg/limits ctx n)])) router/names)

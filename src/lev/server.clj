@@ -586,8 +586,10 @@
                 (let [agent (router/load-model rt (:default rt))]
                   (if (router/thinker? rt (:default rt))
                     (log (format "thinker %s loaded in %.1fs" (:default rt) (/ (- (System/nanoTime) t0) 1e9)))
-                    (log (format "%d tensors loaded in %.1fs; max_len %d%s, head_max_len %d"
-                                 (count (:w agent)) (/ (- (System/nanoTime) t0) 1e9)
+                    (log (format "%d tensors loaded on %s in %.1fs; max_len %d%s, head_max_len %d"
+                                 (count (:tensors (:manifest agent)))
+                                 (str (name (:backend agent :cpu)) " " (name (:dtype agent :f32)))
+                                 (/ (- (System/nanoTime) t0) 1e9)
                                  (:max-len (:cfg agent))
                                  (if (not= (:max-len (:cfg agent)) (:trained-max-len agent))
                                    (str " (trained " (:trained-max-len agent) ")") "")

@@ -37,6 +37,15 @@
                 :darwin ["native/liblev_llm.dylib"]
                 :linux  ["native/liblev_llm.so"]
                 :static {:archive "native/liblev_llm.a"}}
+               ;; mlx-c + mlx behind native/lev_mlx.c, built by `jolt mlx`
+               ;; (optional, mac only: without it the encoders run on the C
+               ;; kernels; MLX finds its kernels in native/mlx.metallib next
+               ;; to the dylib, or next to the binary for a jolt build)
+               {:name "lev_mlx"
+                :optional true
+                :darwin ["native/liblev_mlx.dylib"]
+                :linux []
+                :static {:archive "native/liblev_mlx.a"}}
                ;; what the static llm archive needs at link time: the C++
                ;; runtime and, on mac, the frameworks ggml-metal uses. ld64
                ;; links a framework by its stub when it finds lib<Name>.tbd
@@ -57,6 +66,11 @@
                 :darwin ["/System/Library/Frameworks/Foundation.framework/Foundation"]
                 :linux []
                 :static {:darwin {:lib "Foundation" :libdir "native/frameworks"}}}
+               {:name "quartzcore"
+                :optional true
+                :darwin ["/System/Library/Frameworks/QuartzCore.framework/QuartzCore"]
+                :linux []
+                :static {:darwin {:lib "QuartzCore" :libdir "native/frameworks"}}}
                {:name "metalkit"
                 :optional true
                 :darwin ["/System/Library/Frameworks/MetalKit.framework/MetalKit"]
@@ -117,8 +131,29 @@
              (println "llm: up to date -" lib "native/liblev_llm.a")
              (shell "sh" "native/build_llm.sh")))}
 
+  mlx
+  {:doc "clone mlx-c at the pinned tag into native/mlx-c (it fetches mlx itself), build both static, wrap them in native/liblev_mlx.* with the Metal kernels beside it (the encoders' optional GPU backend, mac only; MLX_C_SRC=path clones from a local checkout)"
+   :task (let [tag "v0.6.0"
+               src (or (System/getenv "MLX_C_SRC") "https://github.com/ml-explore/mlx-c")
+               dir "native/mlx-c"
+               lib "native/liblev_mlx.dylib"]
+           (when-not mac? (throw (ex-info "the mlx backend is mac only (MLX's GPU backend is Metal)" {})))
+           (when-not (fs/exists? (str dir "/CMakeLists.txt"))
+             (shell "git" "clone" "--quiet" "--depth" "1" "--branch" tag src dir))
+           (when-not (fs/exists? (str dir "/build/libmlxc.a"))
+             (shell "cmake" "-S" dir "-B" (str dir "/build") "-DCMAKE_BUILD_TYPE=Release"
+                    "-DBUILD_SHARED_LIBS=OFF" "-DMLX_C_BUILD_EXAMPLES=OFF" "-DMLX_BUILD_GGUF=OFF"
+                    "-DMLX_BUILD_SAFETENSORS=OFF" "-DMLX_BUILD_TESTS=OFF" "-DMLX_BUILD_EXAMPLES=OFF"
+                    "-DMLX_BUILD_PYTHON_STUBS=OFF")
+             (shell "cmake" "--build" (str dir "/build")
+                    "--parallel" (str (.availableProcessors (Runtime/getRuntime)))))
+           (if (and (fs/exists? lib) (fs/exists? "native/liblev_mlx.a") (fs/exists? "native/mlx.metallib")
+                    (empty? (fs/modified-since lib ["native/lev_mlx.c" "native/build_mlx.sh"])))
+             (println "mlx: up to date -" lib "native/liblev_mlx.a native/mlx.metallib")
+             (shell "sh" "native/build_mlx.sh")))}
+
   binary
-  {:doc "build the standalone HTTP server ./lev-server (kernels and llama.cpp linked in) and self-test it against golden/"
+  {:doc "build the standalone HTTP server ./lev-server (kernels and llama.cpp linked in, mlx too when native/liblev_mlx.a is built) and self-test it against golden/"
    :depends [kernels llama]
    :task (do (shell "jolt" "build" "-m" "lev.server" "-o" "lev-server")
              ;; the suite runs interpreted; the AOT build must prove itself

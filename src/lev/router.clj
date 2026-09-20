@@ -32,6 +32,7 @@
             [lev.agent :as ag]
             [lev.lang :as lang]
             [lev.llm :as llm]
+            [lev.mlx :as mlx]
             [lev.sequence :as seq]
             [lev.think :as think]))
 
@@ -94,18 +95,22 @@
 ;; --- the router -----------------------------------------------------------------------
 
 (defn load-prepared
-  "The default loader: lev.agent/load-agent on a prepared data directory,
+  "The default loader: lev.agent/load-agent on a prepared data directory
+  (or lev.mlx/load-agent under :backend :mlx, at :dtype :f32 or :f16),
   with the sequence limits configured for that checkpoint and, under
   :calibration, a lev.calibrate file applied over the checkpoint's
   temperatures. Throws {:type :model-unavailable} when there is nothing
-  there."
+  there, or when the mlx native is not built."
   ([name dir] (load-prepared name dir nil))
   ([name dir limits]
    (when-not (and dir (.exists (clojure.java.io/file dir "manifest.edn")))
      (throw (ex-info (str "checkpoint " name " is not prepared (no " dir "/manifest.edn); "
                           "run jolt prepare for it or point :models at its data directory")
                      {:type :model-unavailable :model name :dir dir})))
-   (let [agent (ag/load-agent dir (assoc (dissoc limits :calibration) :name name))]
+   (let [opts (assoc (dissoc limits :calibration) :name name)
+         agent (case (:backend limits :cpu)
+                 :mlx (mlx/load-agent dir opts)
+                 (ag/load-agent dir opts))]
      (if-let [path (:calibration limits)]
        (do (when-not (.exists (clojure.java.io/file path))
              (throw (ex-info (str "calibration file " path " for " name " does not exist") {:type :model-unavailable :model name :file path})))
@@ -217,10 +222,17 @@
 (defn- touch! [order key]
   (swap! order #(conj (vec (remove #{key} %)) key)))
 
+(defn- close!
+  "Give an agent's native state back (an MLX model, a thinker's llama
+  context, the kernels' weights): its :close, when it has one."
+  [agent]
+  (when-let [c (:close agent)] (c agent)))
+
 (defn- evict! [agents order max]
   (while (> (count @order) max)
     (let [victim (first @order)]
       (swap! order subvec 1)
+      (close! (get @agents victim))
       (swap! agents dissoc victim))))
 
 (defn load-model
@@ -250,6 +262,7 @@
 (defn unload
   "Free one model, or all of them."
   ([router]
+   (doseq [a (concat (vals @(:agents router)) (vals @(:thinker-agents router)))] (close! a))
    (reset! (:agents router) {})
    (reset! (:order router) [])
    (reset! (:thinker-agents router) {})
@@ -259,6 +272,7 @@
          [agents order] (if (thinker? router key)
                           [(:thinker-agents router) (:thinker-order router)]
                           [(:agents router) (:order router)])]
+     (close! (get @agents key))
      (swap! agents dissoc key)
      (swap! order #(vec (remove #{key} %))))))
 

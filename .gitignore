@@ -13,6 +13,8 @@ target/
 .lsp/
 *.a
 native/llama.cpp/
+native/mlx-c/
+*.metallib
 native/frameworks/
 lev-server
 *.build/

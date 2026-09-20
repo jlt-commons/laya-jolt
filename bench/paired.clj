@@ -14,16 +14,17 @@
   interval over the rounds (2,000 resamples, fixed seed) next to the
   p50s themselves. An interval that includes 1 is no win.
 
-    jolt -M bench/paired.clj --candidates cpu,cpu [--case short4|long4|long1|all]
+    jolt -M bench/paired.clj --candidates cpu,mlx,mlx16 [--case short4|long4|long1|all]
                              [--rounds 30] [--warmup 3] [--data DIR] [--model NAME]
 
-  Candidates, the first the baseline: cpu (the C kernels), mlx (lev.mlx,
-  once jolt mlx has built it). `cpu,cpu` measures the noise floor: a
-  ratio of 1 inside its interval, and how wide that interval is on this
-  machine."
+  Candidates, the first the baseline: cpu (the C kernels), mlx (lev.mlx
+  at f32, once jolt mlx has built it), mlx16 (lev.mlx at f16). `cpu,cpu`
+  measures the noise floor: a ratio of 1 inside its interval, and how
+  wide that interval is on this machine."
   (:require [clojure.string :as str]
             [lev.agent :as ag]
             [lev.config :as cfg]
+            [lev.mlx :as mlx]
             [lev.router :as router]))
 
 ;; --- statistics ---------------------------------------------------------------
@@ -145,12 +146,13 @@
   [rt model name]
   (case name
     "cpu" (router/load-model rt model)   ; the router keeps one agent per checkpoint: cpu,cpu is the same agent twice
-    "mlx" (throw (ex-info "the mlx candidate needs lev.mlx (jolt mlx); not built yet" {:type :model-unavailable}))
-    (throw (ex-info (str "unknown candidate " (pr-str name) "; cpu or mlx") {:type :unknown-candidate :name name}))))
+    "mlx" (mlx/load-agent (get (:models rt) (router/normalise-name model)) {:name model :dtype :f32})
+    "mlx16" (mlx/load-agent (get (:models rt) (router/normalise-name model)) {:name model :dtype :f16})
+    (throw (ex-info (str "unknown candidate " (pr-str name) "; cpu, mlx or mlx16") {:type :unknown-candidate :name name}))))
 
 (defn- usage []
   (binding [*out* *err*]
-    (println "usage: jolt -M bench/paired.clj --candidates cpu,mlx [--case short4|long4|long1|all] [--rounds 30] [--warmup 3] [--data DIR] [--model NAME]")))
+    (println "usage: jolt -M bench/paired.clj --candidates cpu,mlx,mlx16 [--case short4|long4|long1|all] [--rounds 30] [--warmup 3] [--data DIR] [--model NAME]")))
 
 (defn -main [& args]
   (if (empty? args)

@@ -1,125 +1,132 @@
-# Adopting an optional MLX backend for lev
+# The MLX backend: what was taken from laya-mlx, and what was not
 
 September 2026. Source: a full read of `/Users/yogthos/src/laya-mlx` (the
 independent MLX port of the same convaiinnovations/laya checkpoints lev
-runs), its BENCHMARKS.md, and lev's own seams (lev.agent, lev.model,
-lev.router, lev.sequence, native/lev_llm.c + build_llm.sh, deps.edn).
+runs), its BENCHMARKS.md, its `experiments/` (the 10x research: math
+budgets, weight spectra, compile / quantization / head-pruning / custom
+Metal kernel trials) and lev's own seams. The measurements this note
+promised are in bench/README.md; this is the record of the decisions.
 
 ## What laya-mlx is
 
 A from-scratch MLX inference runtime for the exact checkpoints lev serves:
 ModernBERT-large / mmBERT-base encoder, 2-layer transformer decision head,
-scorer + act head, RLCD calibration read from the checkpoint's JSON. It
-loads the *upstream* safetensors directly (parameter names sanitized at
-load), tokenizes with `tokenizers`, and answers in the same shape lev's
-`system-one` already produces (choice/score/noul, probabilities rounded to
-4 decimals, entropy confidence, act_probability). No PyTorch anywhere.
+scorer + act head, RLCD calibration read from the checkpoint's JSON,
+tokenized with HF's Rust `tokenizers`, answering in the shape lev's
+`system-one` already produces. lev already had every piece of that
+runtime, implemented independently and held to a tighter parity bar (one
+unit in the fourth decimal against the torch oracle, where laya-mlx's
+FP16 drifts 5e-3), and lev's C attention already skips out-of-window key
+tiles on sliding layers, which laya-mlx's math note only proposes. So
+nothing of the runtime was ported as code. Four things transferred.
 
-## What the numbers say
+## 1. The MLX runtime itself, as a native backend (landed: `lev.mlx`)
 
-Measured on an M3 Max (laya-mlx's BENCHMARKS.md; lev runs on the same
-class of machine). End-to-end latency per request, P50:
+The first draft of this note recommended a Python sidecar, believing MLX
+had no stable C face. It does: [mlx-c](https://github.com/ml-explore/mlx-c)
+is Apple's official C binding (what mlx-swift sits on), released in
+lockstep with MLX; its v0.6.0 tag fetches mlx v0.31.1 and exposes
+`mlx_fast_rope`, `mlx_fast_scaled_dot_product_attention` (boolean array
+mask), `mlx_fast_layer_norm`, `mlx_addmm`, `mlx_erf`, `mlx_take`,
+`mlx_array_new_data`, `mlx_eval`. That is the whole forward, so the
+backend took exactly the shape `lev_llm.c` already had for llama.cpp:
 
-- **1 question, short input, FP16**: laya 13.4 ms, multilingual 7.4 ms,
-  typed-decisions 13.7 ms.
-- **10 questions FP16**: 71 ms / 27 ms / 76 ms.
-- **Full-context 512/1024-token single question FP16**: 45–99 ms.
-- FP32 MLX is ~1.2–1.6x slower than FP16; PyTorch MPS FP32 slower still.
-- Accuracy: 256/256 AG News prediction agreement with upstream FP32 at
-  FP16, max calibrated probability error 0.0054 (lev's parity bar is one
-  unit in the fourth decimal, ~0.0001, so **FP16 fails lev's golden
-  tests as-is**; FP32 MLX agrees to 5e-6).
-- Memory: FP16 weights are 803.6 MiB for the 421M checkpoints (vs ~1.6
-  GiB f32), peak ~944 MiB for one short question.
+- `jolt mlx` clones mlx-c at the pin into `native/mlx-c`, cmake-builds it
+  static (its FetchContent pulls MLX at the matching tag), and
+  `native/build_mlx.sh` wraps `native/lev_mlx.c` with both archives into
+  `liblev_mlx.{dylib,a}`; `:optional true` in `:jolt/native`, darwin
+  only. A tree without it runs exactly as before.
+- `native/lev_mlx.c` holds the weights on the device (read from lev's own
+  `data/*.f32` files, one `lev_mlx_load_tensor` per manifest entry, so
+  the 1.7 GB never enters the jolt heap) and builds the forward as one
+  lazy graph per batch, evaluated once: embeddings, N layers (RoPE,
+  fast SDPA with the padding / window mask, exact-erf gated GELU), final
+  norm, type embedding, the two head layers, the scorer at the markers,
+  the act features and head. What crosses the FFI is what
+  `lev.model/forward-batch` answers: the marker logits and two act
+  logits per row, f32.
+- The seam is `forward-batch`, not `system-one*`: an encoder agent now
+  carries `:forward` (the C kernels' `lev.model/forward-batch` by default)
+  and `lev.mlx/load-agent` builds the same agent shell
+  (`lev.agent/agent-shell`: config, tokenizer, prefix cache, limits) with
+  the device model as `:w` and `lev.mlx/forward-batch` as `:forward`. So
+  validation, sequence building, calibration, constraints, debias,
+  truncation reporting and `lev.calibrate` are shared, untouched.
+- Config: `:backend cpu|mlx` and `:dtype f32|f16`, top-level or per
+  checkpoint, env `LEV_BACKEND` / `LEV_DTYPE`, CLI `--backend` /
+  `--dtype`, through `lev.config/limits` like the sequence limits; the
+  router's `load-prepared` dispatches on it and answers
+  `:model-unavailable` when the native is not built.
+- Agents that own native state now carry `:close`, and the router calls
+  it on eviction and unload — which also fixed a pre-existing leak: an
+  evicted CPU agent's 1.7 GB of malloc'd weights and an unloaded
+  thinker's llama context were never freed.
 
-Compare lev today: ~125 ms a case on the M-series CPU (bench/README),
-f32, one binary, no Python. So the prize is real but bounded: roughly
-**3–9x on short inputs, ~2x on full context, half the memory** — in
-exchange for the costs below.
+### The numerical-parity decision
 
-## Three integration paths, ranked
+laya-mlx's FP16 passes *task* parity (argmax agreement) but not *value*
+parity (5.4e-3 drift); lev's bar is value parity. So the backend
+defaults to f32 on the device, where it reproduces the C kernels on the
+golden batch to 1e-4 and the README answers to the oracle
+(`lev.mlx-test`), and authored144 / the trio to the case and the ECE
+digit. f16 is opt-in: the same labels (one authored144 case moves, in
+its favour), probabilities within 1e-2, half the memory, ~20% faster
+again. bench/README.md has the table: **4.0x** on a short four-question
+call at f32, 5.1x at f16, measured interleaved.
 
-### 1. (Recommended) a sidecar process, like laya-mlx's own snake demo
+### The metallib
 
-lev-server keeps its C kernels; an optional MLX sidecar (the laya-mlx
-package as-is, plus a ~100-line stdin/stdout or HTTP shim exposing
-`prepare`/`forward` per batch) is spawned when config asks for it.
-The router already has the seam: `:loader` in make-router. A
-`load-prepared` variant that returns a `{:kind :mlx ...}` agent map, and
-a `defmethod system-one* :mlx` that ships the already-validated,
-already-built sequences to the sidecar and gets logits back, leaves
-*every* lev-side invariant intact: sequence building, calibration,
-constraints, debias, truncation reporting. The logits are the only thing
-that crosses the boundary, and they're f32 (sidecar converts FP16
-internals to f32 before returning).
+MLX's Metal kernels are a 100 MB `mlx.metallib` it loads from next to the
+binary holding MLX, else from the build tree's absolute path. The build
+puts a copy in `native/` (next to the dylib, for `jolt run` / `test`);
+a `jolt build` binary needs it beside `lev-server`. A missing library is
+reported as such by `lev.mlx` with that hint (the first MLX error is
+kept, since every op after it fails with an unhelpful "empty array").
 
-- Pros: zero new native code in lev, no llama.cpp-scale build matrix, the
-  421M params never enter the jolt heap, MLX stays optional (a tree
-  without uv/laya-mlx runs exactly as today), and the parity story is
-  clean — golden tests compare logits sidecar-vs-C-kernels to 1e-4.
-- Cons: a Python process in the deployment story; one pipe round-trip
-  per batch (~0.1–0.5 ms, noise vs 13 ms); on mac only (Metal; the
-  linux story would be CUDA-only MLX or nothing).
+## 2. The state tokenized once, the prefixes cached (landed: `lev.sequence`)
 
-### 2. A native lev_mlx.c shim over libmlx.dylib
+laya-mlx's `PrefixCache`: cache the tokenized question prefix `[CLS]
+<type> instructions [SEP] [MASK] opt0 ... [SEP]` keyed by (head_max_len,
+type, instructions, options), and tokenize the state once per call. lev
+was tokenizing the state once *per question*, at ~33 µs a token: 48 ms a
+question on a 1.6k-token state, four times over in a four-question call.
+Now `build-prefix` / `encode-state` / `assemble` split `build-sequence`
+in two and the agent keeps a 128-entry LRU of prefixes. Byte-identical
+ids (the sequence golden proves it); the long-state four-question call
+drops 10%.
 
-Mirror lev_llm.c: a flat C face over `mx.array` / `mx.fast.rope` /
-`mx.fast.scaled_dot_product_attention`, declared in deps.edn :jolt/native,
-built by a `jolt mlx` task cloning the mlx-cxx repo at a pin. This is the
-"one binary" purist path but it is a *large* lift: mlx's C++ API is
-template-heavy and not C-stable; every op would need hand-written
-wrappers; weights would flow through jolt buffers. Cost is weeks, not
-days. Only worth it if path 1 proves out and the sidecar process offends.
+## 3. The paired benchmark (landed: `bench/paired.clj`)
 
-### 3. Port MLX's *ideas* only, no MLX dependency
+`experiments/engineering/paired.py` + `analyze.py`: every round takes one
+input and runs every candidate on it in an order rotated per round;
+report the median of per-round `baseline / candidate` ratios with a
+percentile-bootstrap 95% interval. Their sequential pilot said 1.24x for
+compile, the paired run 1.03x; lev's own before/after of the same code
+moved 288 → 304 ms. The noise floor here (`cpu,cpu`) is 1.00x ±2% over
+20 rounds. It is what decides whether the last item lands.
 
-Two directly portable wins, both applicable to lev's CPU backend today:
+## 4. Exact last-head-layer pruning (measured before landing)
 
-- **PrefixCache (laya_mlx/prepared.py)**: cache the tokenized question
-  prefix `[CLS] <type> instructions [SEP] [MASK] opt0 ... [SEP]` keyed by
-  (tokenizer, head_max_len, qtype, instructions, options). lev's
-  sequences are built identically (lev.sequence/build-sequence), and its
-  workloads are exactly the hit pattern: same questions, fresh state —
-  the typed-decisions workflows, authored144's repeated templates,
-  snake's per-tick questions. laya-mlx bounds it at 128 entries LRU.
-  Saves the whole tokenize+build cost of every repeat; at 125 ms a case
-  even 10% is measurable. **Cheapest real win in this document.**
-- **pad_to_multiple bucketing**: pad rows to a multiple of 16 tokens so
-  MLX's compiler can reuse kernels across calls. On lev's C kernels this
-  is neutral at best (its sgemm is shape-generic); skip unless measured.
+`run_variants.py`'s `selected_head`: only the CLS and marker rows of the
+last head layer are read downstream, so its Q, out-projection and FFN
+need only those 1+k rows (K/V still all rows). Exact dependency pruning;
+2.7–4.6% of modeled FLOPs; laya-mlx measured 1.03–1.08x paired. Lands
+only if `bench/paired.clj` puts its interval above 1 on lev.
 
-Not portable: MLX's `mx.compile` graph fusion — lev's forward is already
-imperative Clojure over C kernels; there is nothing to fuse across.
+## Not ported, with the evidence
 
-## What does NOT transfer from laya-mlx's implementation
-
-lev already implements, independently and to tighter parity, everything
-laya-mlx had to build: sequence layout, option rendering, noul [false
-true] ordering, confidence_from_probs, temp_bucket calibration buckets,
-collation (lev's forward-batch pads per-chunk already), act head softmax,
-answer shapes. Porting code would be a regression risk with no gain.
-The only genuinely new artifacts worth taking are the two optimizations
-above and the snake demo (ported separately as examples/snake, its own project).
-
-## Numerical-parity decision lev has to make
-
-laya-mlx's FP16 passes *task* parity (256/256 argmax agreement) but not
-*value* parity (5.4e-3 probability drift). lev's convention ("compared
-to one unit in the fourth decimal") is a value-parity bar. So an MLX
-backend must default to FP32 on the weights (5e-6 agreement, well under
-the bar) and treat FP16 as an opt-in speed mode, documented as
-approximate, off the golden path — the same posture lev already takes
-for the thinker's greedy decoding vs the encoders' exact answers.
-
-## Recommended sequence
-
-1. Port PrefixCache into lev.sequence (pure Clojure, LRU, keyed as
-   above) + a bench/authored144 run before/after. Independent of MLX.
-2. examples/snake (its own project; jolt -M:run there) as the end-to-end consumer of the API.
-3. Path 1 sidecar behind a config flag (`:backends {:mlx ...}`), with a
-   golden logit-parity test (sidecar vs C kernels, tol 1e-4) gating it.
-4. Only then decide FP16: bench authored144 + trio accuracy/ECE at FP16
-   sidecar vs f32 C kernels; land only if accuracy holds and the README
-   documents the drift.
-
-None of steps 3–4 block the snake example; steps 1–2 are useful alone.
+- `mx.compile`: 1.03x interleaved on their side; nothing to fuse across
+  lev's imperative C-kernel forward, and the MLX graph here is built in C
+  per batch, where laziness already batches the dispatches.
+- A custom exact-erf Metal GELU/gate kernel: bit-exact, no consistent win
+  over MLX's compiled expression.
+- 8-bit / 4-bit backbone weights: no speedup at these shapes (larger
+  pilots slower), 62/63 and 50/63 fixture agreement with probability
+  shifts up to 0.33.
+- Low-rank weights: the rank a 10x matrix-work cut allows keeps 25–33% of
+  the Frobenius energy (84% relative error) on the four sampled matrices.
+- Exact whole-input deduplication: lev's questions within a call always
+  have distinct prefixes (debias rotations too), so there is no hit.
+- First-layer QKV precompute (0.85% of work), `pad_to_multiple` (only
+  helps a shape-specializing compiler), length-sorted chunking (rows in a
+  call differ only by prefix length, ≤192 tokens).

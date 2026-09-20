@@ -13,7 +13,11 @@
     :max-len :head-max-len
                      sequence limits for every checkpoint, instead of the
                      ones prepare took from rl_agent_config.json
-    :checkpoints     {\"name\" {:max-len .. :head-max-len ..}} per checkpoint
+    :backend :dtype  which engine runs the encoders: \"cpu\" (the C kernels, the
+                     default) or \"mlx\" (Apple's GPU, jolt mlx), at \"f32\" (the
+                     default; the goldens' precision) or \"f16\" (mlx only: half the
+                     memory, faster, values off by up to 1e-2)
+    :checkpoints     {\"name\" {:max-len .. :head-max-len .. :backend .. :dtype ..}} per checkpoint
     :thinkers        {\"name\" {:model \"x.gguf\" :thinking true ...}} generative
                      models (lev.think) the server offers under that name
 
@@ -23,6 +27,7 @@
                      defaults (bundled ./workflows, :workflow-dirs, the
                      config dir's workflows/)
     LEV_THINKER     a GGUF path: the thinker named `thinker` (--thinker)
+    LEV_BACKEND / LEV_DTYPE   :backend / :dtype for every checkpoint (--backend, --dtype)
 
   The pure functions take an `env` map so tests never read the real
   environment; nil means the process environment."
@@ -108,19 +113,35 @@
         (string? v) (Long/parseLong (str/trim v))
         :else (throw (ex-info (str "not an integer: " (pr-str v)) {:value v}))))
 
+(defn- as-choice
+  "v as one of the keywords in `allowed` (a keyword or a string, any case)."
+  [what allowed v]
+  (let [k (keyword (str/lower-case (str/trim (name v))))]
+    (when-not (contains? allowed k)
+      (throw (ex-info (str "unknown " what " " (pr-str v) "; one of " (str/join ", " (map name (sort allowed))))
+                      {:type :invalid-config :key what :value v :allowed allowed})))
+    k))
+
 (defn limits
-  "The sequence limits configured for checkpoint `name`: {:max-len
-  :head-max-len}, only the keys that are set. config.edn's top-level keys
-  apply to every checkpoint, its :checkpoints {name {...}} entry to one;
-  LEV_MAX_LEN / LEV_HEAD_MAX_LEN and --max-len / --head-max-len beat both,
-  for every checkpoint. {} means the checkpoint's own values stand."
+  "What the loader needs for checkpoint `name`: the sequence limits
+  {:max-len :head-max-len} and the engine {:backend :dtype}, only the keys
+  that are set. config.edn's top-level keys apply to every checkpoint, its
+  :checkpoints {name {...}} entry to one; the environment (LEV_MAX_LEN,
+  LEV_HEAD_MAX_LEN, LEV_BACKEND, LEV_DTYPE) and the CLI (--max-len,
+  --head-max-len, --backend, --dtype) beat both, for every checkpoint. {}
+  means the checkpoint's own values stand, on the C kernels."
   [{:keys [opts env config]} name]
   (let [pick (fn [m k] (when (contains? m k) {k (as-int (get m k))}))
-        layer (fn [m] (merge (pick m :max-len) (pick m :head-max-len)))
+        choice (fn [m k allowed] (when (some? (get m k)) {k (as-choice (clojure.core/name k) allowed (get m k))}))
+        engine (fn [m] (merge (choice m :backend #{:cpu :mlx}) (choice m :dtype #{:f32 :f16})))
+        layer (fn [m] (merge (pick m :max-len) (pick m :head-max-len) (engine m)))
         from-env (merge (when-let [v (getenv env "LEV_MAX_LEN")] {:max-len (as-int v)})
-                        (when-let [v (getenv env "LEV_HEAD_MAX_LEN")] {:head-max-len (as-int v)}))
+                        (when-let [v (getenv env "LEV_HEAD_MAX_LEN")] {:head-max-len (as-int v)})
+                        (engine {:backend (getenv env "LEV_BACKEND") :dtype (getenv env "LEV_DTYPE")}))
         from-cli (merge (when (string? (get opts "--max-len")) {:max-len (as-int (get opts "--max-len"))})
-                        (when (string? (get opts "--head-max-len")) {:head-max-len (as-int (get opts "--head-max-len"))}))]
+                        (when (string? (get opts "--head-max-len")) {:head-max-len (as-int (get opts "--head-max-len"))})
+                        (engine {:backend (let [v (get opts "--backend")] (when (string? v) v))
+                                 :dtype (let [v (get opts "--dtype")] (when (string? v) v))}))]
     (or (merge (layer config)
                (layer (get-in config [:checkpoints name] {}))
                from-env

@@ -91,6 +91,30 @@
     (testing "max-loaded is at least 1"
       (is (= 1 (:max-loaded (router/make-router {:loader (fake-loader (atom [])) :max-loaded 0})))))))
 
+(deftest evicted-and-unloaded-agents-are-closed
+  ;; an agent that owns native state (an MLX model, a thinker's llama
+  ;; context, the C kernels' malloc'd weights) says how to give it back
+  ;; under :close; the router calls it exactly once, when the agent leaves
+  (let [closed (atom [])
+        loader (fn [name dir & _] {:fake name :dir dir :close (fn [a] (swap! closed conj (:fake a)))})
+        r (router/make-router {:loader loader :max-loaded 1})]
+    (router/load-model r "english")
+    (router/load-model r "multilingual")
+    (is (= ["english"] @closed) "evicted: closed")
+    (router/unload r "multilingual")
+    (is (= ["english" "multilingual"] @closed) "unloaded by name: closed")
+    (router/load-model r "english")
+    (router/unload r)
+    (is (= ["english" "multilingual" "english"] @closed) "unload all: closed")
+    (testing "thinkers too, and an agent without :close is simply dropped"
+      (let [r (router/make-router {:loader (fn [name dir & _] {:fake name})
+                                   :thinkers {"t" {:model "x.gguf"}}
+                                   :thinker-loader (fn [name cfg] {:kind :thinker :name name :close (fn [_] (swap! closed conj name))})})]
+        (router/load-model r "english")
+        (router/load-model r "t")
+        (router/unload r)
+        (is (= ["english" "multilingual" "english" "t"] @closed))))))
+
 (deftest predict-is-system-one-plus-routing
   (let [r (router/make-router {:models {"english" tu/data-dir "multilingual" "target/not-prepared"}
                                ;; the suite's one english agent; other names go through the
