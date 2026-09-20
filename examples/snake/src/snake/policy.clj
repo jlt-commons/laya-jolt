@@ -1,11 +1,11 @@
-(ns lev.snake-policy
+(ns snake.policy
   "lev's snake brain, the port of laya-mlx's snake/policy.py: the compact
   prompt and typed question set over the deterministic game, then guarded
   execution — the model proposes (argmax over the choice probabilities),
   the safety shield disposes (restricts to the planner's safe moves).
   The Decision map carries what the UI and the replay log need."
   (:require [lev.agent :as ag]
-            [lev.snake :as s]
+            [snake.game :as s]
             [lev.sequence :as seq]))
 
 (defn state-line

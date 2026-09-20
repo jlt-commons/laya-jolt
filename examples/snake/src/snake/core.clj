@@ -1,28 +1,16 @@
-(ns lev.snake-ui
+(ns snake.core
   "lev playing snake over raylib: the encoder answers the compact question
-  set every tick (lev.snake-policy), the safety shield keeps it alive, the
+  set every tick (snake.policy), the safety shield keeps it alive, the
   window shows the board and the model's own read of the situation.
 
-  The system raylib is loaded at runtime (load-shared-object), so this
-  namespace fails only when actually run: jolt -M:test and friends never
-  need raylib. Run with `jolt -M:snake` (data/ must be prepared).
-  Keys: SPACE restarts, G toggles the safety shield, ESC quits.
-  LEV_SNAKE_MAX_FRAMES bounds the run for smoke tests."
+  Run from this project with `jolt -M:run` (lev's data/ must be prepared,
+  or LEV_DATA points elsewhere). Keys: SPACE restarts, G toggles the
+  safety shield, ESC quits. LEV_SNAKE_MAX_FRAMES bounds the run for smoke
+  tests."
   (:require [jolt.ffi :as ffi]
-            [jolt.scheme :as scheme]
             [lev.agent :as ag]
-            [lev.snake :as s]
-            [lev.snake-policy :as p]))
-
-(def raylib-path
-  (if (re-find #"^Mac" (System/getProperty "os.name"))
-    "/opt/homebrew/lib/libraylib.dylib"
-    "libraylib.so.6"))
-
-(defn load-raylib! []
-  (scheme/eval-string (str "(load-shared-object \"" raylib-path "\")")))
-
-(load-raylib!)
+            [snake.game :as s]
+            [snake.policy :as p]))
 
 ;; --- the raylib surface this demo uses; Color crosses as a packed uint ---
 
@@ -101,7 +89,7 @@
 (defn -main
   [& _]
   (let [max-frames (some-> (System/getenv "LEV_SNAKE_MAX_FRAMES") Integer/parseInt)
-        agent (delay (ag/load-agent (or (System/getenv "LEV_DATA") "data")))]
+        agent (delay (ag/load-agent (or (System/getenv "LEV_DATA") "../../data")))]
     (init-window (* (:width (s/new-game)) cell)
                  (+ hud (* (:height (s/new-game)) cell))
                  "lev plays snake (system one)")

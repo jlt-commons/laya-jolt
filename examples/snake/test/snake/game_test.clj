@@ -1,9 +1,9 @@
-(ns lev.snake-test
+(ns snake.game-test
   "The deterministic snake rules, ported from laya-mlx's snake/game.py and
   pinned to its observable behavior: the hamiltonian cycle, legality with
   the tail vacating, the cycle-safety planner, flood-fill reachability."
   (:require [clojure.test :refer [deftest is testing]]
-            [lev.snake :as s]))
+            [snake.game :as s]))
 
 (deftest hamiltonian-cycle-shape
   (testing "visits every cell once, adjacent steps, closes the loop"

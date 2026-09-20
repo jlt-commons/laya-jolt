@@ -1,0 +1,18 @@
+{;; lev playing snake: a standalone jolt project, not part of the lev
+  ;; server. The encoder engine comes from the checkout one level up via
+  ;; local/root; data/ stays where `jolt prepare` wrote it in the lev root
+  ;; (LEV_DATA overrides, both for the tests and the game).
+ :paths ["src"]
+
+ :deps {lev/lev {:local/root "../.."}}
+
+ ;; the system raylib over its C ABI. Chez's dlopen default search path
+ ;; skips Homebrew's lib dir, so the absolute path is listed first (same
+ ;; as raylib-jolt-examples).
+ :jolt/native [{:name "raylib"
+                :darwin ["/opt/homebrew/lib/libraylib.dylib" "libraylib.dylib"]
+                :linux  ["libraylib.so.6" "libraylib.so"]}]
+
+ :aliases {:test {:extra-paths ["test"]
+                  :main-opts ["-m" "snake.test-runner"]}
+           :run  {:main-opts ["-m" "snake.core"]}}}

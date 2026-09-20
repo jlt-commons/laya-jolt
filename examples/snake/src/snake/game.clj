@@ -1,4 +1,4 @@
-(ns lev.snake
+(ns snake.game
   "Deterministic snake rules and a separately identified cycle-safety
   planner, ported from laya-mlx's laya_mlx/snake/game.py: the board is a
   hamiltonian cycle, every cell named by its index along it. Legality is

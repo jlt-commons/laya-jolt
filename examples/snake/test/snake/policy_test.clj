@@ -1,13 +1,13 @@
-(ns lev.snake-policy-test
+(ns snake.policy-test
   "The lev.snake-policy layer over the game: compact prompt construction,
   the choice/noul question set, guarded execution against the safe moves.
   Logic tests run against a :mock agent registered on system-one*; one
   smoke test exercises the real english checkpoint (test-util's delay)."
   (:require [clojure.test :refer [deftest is testing]]
             [lev.agent :as ag]
-            [lev.snake :as s]
-            [lev.snake-policy :as p]
-            [lev.test-util :as tu]))
+            [snake.game :as s]
+            [snake.policy :as p]
+            [snake.test-util :as tu]))
 
 (defn- install-mock!
   "Register an agent kind whose answers are fixed: move probabilities,

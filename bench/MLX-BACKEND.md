@@ -99,7 +99,7 @@ true] ordering, confidence_from_probs, temp_bucket calibration buckets,
 collation (lev's forward-batch pads per-chunk already), act head softmax,
 answer shapes. Porting code would be a regression risk with no gain.
 The only genuinely new artifacts worth taking are the two optimizations
-above and the snake demo (being ported separately as examples/snake).
+above and the snake demo (ported separately as examples/snake, its own project).
 
 ## Numerical-parity decision lev has to make
 
@@ -115,7 +115,7 @@ for the thinker's greedy decoding vs the encoders' exact answers.
 
 1. Port PrefixCache into lev.sequence (pure Clojure, LRU, keyed as
    above) + a bench/authored144 run before/after. Independent of MLX.
-2. examples/snake (in flight) as the end-to-end consumer of the API.
+2. examples/snake (its own project; jolt -M:run there) as the end-to-end consumer of the API.
 3. Path 1 sidecar behind a config flag (`:backends {:mlx ...}`), with a
    golden logit-parity test (sidecar vs C kernels, tol 1e-4) gating it.
 4. Only then decide FP16: bench authored144 + trio accuracy/ECE at FP16
