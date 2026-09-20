@@ -167,3 +167,29 @@ What the numbers say:
 The Jev benchmark from the other session (24/64 for the encoder vs 60/64 hosted Jev)
 is the same shape: a generative model with a reasoning budget against a
 single-pass encoder.
+
+## Multi-question calls: the state tokenized once, the prefixes cached
+
+`bench/workflow.clj` times the README's four email questions as one call
+(choice, score, noul, noul) on a short state (53 tokens) and a long one
+(1,631 tokens, cut to max_len 512 for every question), 30–40 iterations
+after a warmup, `english` on the M-series CPU. Before, `encoder-forward`
+tokenized the state once per question; after (laya-mlx's PrefixCache
+ported: `lev.sequence/encode-state` once a call, `cached-prefix` in a
+128-entry LRU per agent), once per call, and a question asked before
+costs no tokenization at all. Answers are unchanged (golden/ pins them:
+`prefix-and-state-assemble-into-build-sequence` proves the ids byte for
+byte).
+
+| call | before, p50 (two runs) | after, p50 (two runs) |
+|---|---|---|
+| tokenize the 1.6k-token state, alone | 57 ms | 58 ms |
+| 4 questions, short state | 288 / 304 ms | 296 / 302 ms |
+| 4 questions, long state | 1,392 / 1,381 ms | 1,247 / 1,239 ms |
+| 1 question, long state | 400 / 374 ms | 391 / 398 ms |
+
+The long-state call drops 10%: three of its four 48 ms state
+tokenizations were redundant. The short-state case saves ~5 ms of a 300
+ms call, under the run-to-run drift of the same code (288 vs 304 ms), so
+no claim there. The tokenizer itself runs at ~33 µs a token, slow in
+absolute terms (laya-jolt-edf); this removes the repetition, not the rate.

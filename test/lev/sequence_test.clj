@@ -129,3 +129,54 @@
           (is (= 3 (count (filter #{50281} (ids "mask-injection"))))
               "...while [CLS] in the state stays a special token (leading CLS + two in the state)")
           (is (= 11 (count (get-in cases ["score-many-levels" :markers])))))))))
+
+(deftest prefix-and-state-assemble-into-build-sequence
+  (testing "build-prefix + encode-state + assemble is build-sequence, byte for byte,
+            including the dropped count, on every golden case"
+    (let [cases (tu/read-golden "sequences")
+          readme (tu/read-golden "cases")
+          all (concat (map (fn [[name {:keys [state question]}]] [name state question]) cases)
+                      (map (fn [[qid qdef]] [qid (:readme-state readme) qdef]) (:readme-questions readme)))]
+      (doseq [[name state qdef] all
+              max-len [512 64]]
+        (let [q (ag/to-internal qdef)
+              [pids pmarkers] (seq/build-prefix @tok q 192)
+              state-ids (seq/encode-state @tok state)]
+          (is (= (seq/build-sequence @tok state q max-len 192)
+                 (seq/assemble pids pmarkers state-ids max-len))
+              (str name " at max-len " max-len))))))
+  (testing "the prefix ends with [SEP] and starts with [CLS]; the markers index its [MASK]s"
+    (let [q (ag/to-internal {"type" "choice" "instructions" "Which?" "criteria" ["a" "b" "c"]})
+          [ids markers] (seq/build-prefix @tok q 192)
+          sp (:specials @tok)]
+      (is (= (:cls sp) (first ids)))
+      (is (= (:sep sp) (peek ids)))
+      (is (= 3 (count markers)))
+      (is (every? #(= (:mask sp) (nth ids %)) markers)))))
+
+(deftest prefix-cache-hits-and-is-bounded
+  (let [q (fn [i] (ag/to-internal {"type" "choice" "instructions" (str "Question " i "?") "criteria" ["a" "b"]}))]
+    (testing "a hit answers the very object the miss computed; the answer is build-prefix's"
+      (let [cache (seq/prefix-cache 4)
+            first-time (seq/cached-prefix cache @tok (q 1) 192)]
+        (is (= (seq/build-prefix @tok (q 1) 192) first-time))
+        (is (identical? first-time (seq/cached-prefix cache @tok (q 1) 192)))
+        (is (= 1 (seq/prefix-cache-size cache)))))
+    (testing "head-max-len is part of the key"
+      (let [cache (seq/prefix-cache 4)]
+        (seq/cached-prefix cache @tok (q 1) 192)
+        (seq/cached-prefix cache @tok (q 1) 64)
+        (is (= 2 (seq/prefix-cache-size cache)))))
+    (testing "the least recently used entry goes when the capacity is exceeded"
+      (let [cache (seq/prefix-cache 3)]
+        (doseq [i [1 2 3]] (seq/cached-prefix cache @tok (q i) 192))
+        (seq/cached-prefix cache @tok (q 1) 192)          ; 1 is now the most recent
+        (let [four (seq/cached-prefix cache @tok (q 4) 192)] ; evicts 2
+          (is (= 3 (seq/prefix-cache-size cache)))
+          (is (identical? four (seq/cached-prefix cache @tok (q 4) 192)))
+          (is (identical? (seq/cached-prefix cache @tok (q 1) 192) (seq/cached-prefix cache @tok (q 1) 192)))
+          (let [two-again (seq/cached-prefix cache @tok (q 2) 192)] ; a miss: 2 was evicted, so 3 goes now
+            (is (= (seq/build-prefix @tok (q 2) 192) two-again))
+            (is (= 3 (seq/prefix-cache-size cache)))))))
+    (testing "without a cache, cached-prefix simply computes"
+      (is (= (seq/build-prefix @tok (q 1) 192) (seq/cached-prefix nil @tok (q 1) 192))))))

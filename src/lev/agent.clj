@@ -38,7 +38,11 @@
          cfg (edn/read-string (slurp (str data-dir "/config.edn")))
          tok (tk/load (str data-dir "/tokenizer.edn"))
          agent {:kind :encoder :name (or (:name limits) "encoder")
-                :cfg cfg :tok tok :w (m/load-weights manifest data-dir) :trained-max-len (:max-len cfg)}]
+                :cfg cfg :tok tok :w (m/load-weights manifest data-dir) :trained-max-len (:max-len cfg)
+                ;; the questions' prefixes, tokenized once and kept across
+                ;; calls (lev.sequence/prefix-cache); the map copies that
+                ;; with-limits and with-calibration make share it
+                :prefix-cache (seq/prefix-cache)}]
      (if (seq (dissoc limits :name)) (with-limits agent (dissoc limits :name)) agent))))
 
 (defn- qget
@@ -256,11 +260,17 @@
   logits) :act (the act head's two) :tokens :dropped (state tokens that
   did not fit)}. What system-one calibrates and lev.calibrate refits on."
   [agent state questions]
-  (let [{:keys [cfg tok w]} agent
+  (let [{:keys [cfg tok w prefix-cache]} agent
+        ;; the state is tokenized once for every question in the call (46
+        ;; ms at 1.4k tokens, the same for each question before); a
+        ;; question's prefix comes from the agent's cache when it has been
+        ;; asked before
+        state-ids (seq/encode-state tok state)
         prepared (mapv (fn [[qid qdef]]
                          (let [qdef (validate-question qid qdef)
                                q (to-internal qdef)
-                               [ids markers dropped] (seq/build-sequence tok state q (:max-len cfg) (:head-max-len cfg))]
+                               [pids pmarkers] (seq/cached-prefix prefix-cache tok q (:head-max-len cfg))
+                               [ids markers dropped] (seq/assemble pids pmarkers state-ids (:max-len cfg))]
                            (when (not= (count markers) (count (seq/render-options q)))
                              ;; a debias rotation's id is [qid r]: name the question
                              (let [shown (if (vector? qid) (first qid) qid)]

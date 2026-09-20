@@ -143,11 +143,14 @@
   (let [size (if (<= k 2) "2" (if (<= k 5) "3-5" (if (<= k 10) "6-10" "11+")))]
     (str (qtype-names qtype) ":" size)))
 
-(defn build-sequence
-  "Returns [ids markers dropped]: token ids, the [MASK] marker positions,
-  and how many of the state's tokens did not fit in max-len (0 when the
-  state is read whole)."
-  [tok state q max-len head-max-len]
+(defn build-prefix
+  "The question-only prefix of a sequence, [ids markers]:
+    [CLS] <type> question: <instructions> [SEP] [MASK] opt0 [MASK] opt1 ... [SEP]
+  (build_prefix: everything before the state, before the max-len cut). It
+  depends on the question and head-max-len alone, so it can be cached
+  across calls (`cached-prefix`); the state is tokenized once per call
+  (`encode-state`) and `assemble` joins the two."
+  [tok q head-max-len]
   (let [mask (tk/mask-token tok)
         sp (:specials tok)
         opts (render-options q)
@@ -168,11 +171,74 @@
         [ids markers] (reduce (fn [[ids ms] o]
                                 [(into ids o) (conj ms (count ids))])
                               [base []]
-                              opt-ids)
-        ids (conj ids (:sep sp))
-        room (max 0 (- max-len (count ids) 1))
-        st-all (tk/encode tok (str/replace (serialize-state state) mask " "))
-        st (vec (take room st-all))]
-    [(vec (take max-len (into ids (conj st (:sep sp)))))
-     (filterv #(< % max-len) markers)
-     (- (count st-all) (count st))]))
+                              opt-ids)]
+    [(conj ids (:sep sp)) markers]))
+
+(defn encode-state
+  "The state's token ids: json.dumps for a non-string, [MASK] blanked so
+  the text cannot inject a marker. The whole state, however long: assemble
+  cuts it to the room a prefix leaves and reports how much did not fit."
+  [tok state]
+  (tk/encode tok (str/replace (serialize-state state) (tk/mask-token tok) " ")))
+
+(defn assemble
+  "A prefix ([ids markers] from build-prefix) + the state's ids -> [ids
+  markers dropped] as build-sequence answers them: the state cut to the
+  room the prefix leaves for it and a closing [SEP], the whole cut at
+  max-len, markers past the cut gone, and how many state tokens were
+  dropped (0 when the state is read whole)."
+  [prefix-ids prefix-markers state-ids max-len]
+  (let [room (max 0 (- max-len (count prefix-ids) 1))
+        st (vec (take room state-ids))
+        sep (peek prefix-ids)]
+    [(vec (take max-len (into prefix-ids (conj st sep))))
+     (filterv #(< % max-len) prefix-markers)
+     (- (count state-ids) (count st))]))
+
+(defn build-sequence
+  "Returns [ids markers dropped]: token ids, the [MASK] marker positions,
+  and how many of the state's tokens did not fit in max-len (0 when the
+  state is read whole). build-prefix + encode-state + assemble in one, for
+  a single question; a call with many questions shares the state's ids."
+  [tok state q max-len head-max-len]
+  (let [[pids pmarkers] (build-prefix tok q head-max-len)]
+    (assemble pids pmarkers (encode-state tok state) max-len)))
+
+;; --- prefix cache ---------------------------------------------------------------
+
+(defn prefix-cache
+  "A bounded LRU of built prefixes (laya-mlx's PrefixCache): one per agent,
+  since the key does not name the tokenizer. Workloads are exactly its hit
+  pattern, the same questions over a fresh state: a workflow's fixed
+  questions, a game's per-tick questions, a benchmark's templates. A hit
+  saves the prefix's tokenization (~1 ms a question); with `encode-state`
+  once per call, a repeat call tokenizes nothing but the state."
+  ([] (prefix-cache 128))
+  ([capacity] (atom {:capacity capacity :tick 0 :entries {}})))
+
+(defn prefix-cache-size [cache] (count (:entries @cache)))
+
+(defn- touch
+  "The cache with key marked as just used (and, for a miss, holding v),
+  the least recently used entry dropped past capacity."
+  [{:keys [capacity tick entries] :as c} k v]
+  (let [tick (inc tick)
+        entries (assoc entries k {:v v :t tick})
+        entries (if (> (count entries) capacity)
+                  (dissoc entries (key (apply min-key (comp :t val) entries)))
+                  entries)]
+    (assoc c :tick tick :entries entries)))
+
+(defn cached-prefix
+  "build-prefix through the cache (nil: no cache, just build). Keyed by the
+  question's type, instructions and rendered options and by head-max-len:
+  everything build-prefix reads besides the tokenizer."
+  [cache tok q head-max-len]
+  (if (nil? cache)
+    (build-prefix tok q head-max-len)
+    (let [k [head-max-len (:t q) (:ins q) (render-options q)]]
+      (if-let [hit (get-in @cache [:entries k :v])]
+        (do (swap! cache touch k hit) hit)
+        (let [v (build-prefix tok q head-max-len)]
+          (swap! cache touch k v)
+          v)))))

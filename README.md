@@ -630,7 +630,15 @@ jolt -M bench/authored144.clj --model minicpm5 --thinking false  # 74%, ~150 ms 
 jolt -M bench/authored144.clj --model minicpm5                   # 95%, seconds a case
 jolt -M bench/authored144.clj --debias                            # english with option-rotation averaging: 64%
 jolt -M bench/triad.clj english                                   # AG News / BoolQ / SST-5, with ECE and what a gate keeps
+jolt -M bench/workflow.clj                                        # a 4-question call on a short and a long state, p50 / p95
 ```
+
+A call tokenizes its state once for all its questions, and keeps every
+question's own prefix (`[CLS] question [SEP] [MASK] options [SEP]`) in a
+128-entry cache per loaded model, so a workflow's fixed questions on a
+fresh state, or a game's questions every tick, cost no tokenization
+beyond the state's. On a 1.6k-token state that is 10% of a four-question
+call (bench/README.md); the answers do not change.
 
 A hosted generative decision API wins through its reasoning budget. A
 generative model answering without thinking does no better

@@ -131,6 +131,23 @@
         (is (= 0.0312 (get-in a ["is_phishing" "noul"])))
         (is (= 367 (get-in out ["usage" "input_tokens"])))))))
 
+(deftest prefixes-are-cached-across-calls
+  (testing "a call leaves its questions' prefixes in the agent's cache and a
+            repeat call, hitting them, answers the same"
+    (let [cache (:prefix-cache @agent)
+          _ (reset! cache @(seq/prefix-cache))
+          first-out (ag/system-one @agent state questions)
+          n (seq/prefix-cache-size cache)
+          again (ag/system-one @agent (assoc state "body" "Thanks, all sorted now.") questions)
+          third (ag/system-one @agent state questions)]
+      (is (= 4 n) "one prefix per question")
+      (is (= 4 (seq/prefix-cache-size cache)) "the same questions again: no new entries")
+      (is (= first-out third) "the cached prefixes answer exactly the uncached ones")
+      (is (not= (get first-out "answers") (get again "answers")) "a different state is a different answer")))
+  (testing "an agent map without a cache still answers (nothing is cached)"
+    (is (= (get (ag/system-one @agent state questions) "answers")
+           (get (ag/system-one (dissoc @agent :prefix-cache) state questions) "answers")))))
+
 (deftest answer-shape-is-the-upstream-packages
   ;; Agent.system_one upstream: "action" not "rl_agent", act_probability
   ;; rounded, noul carries a confidence; the model is the agent's name
