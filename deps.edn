@@ -142,4 +142,8 @@
            :run {:main-opts ["-m" "lev.run"]}
            :prepare {:main-opts ["-m" "lev.prepare"]}
            :serve {:main-opts ["-m" "lev.server"]}
-           :calibrate {:main-opts ["-m" "lev.calibrate"]}}}
+           :calibrate {:main-opts ["-m" "lev.calibrate"]}
+           ;; lev playing snake over raylib (examples/snake; the system
+           ;; raylib is loaded at runtime, nothing else needs it)
+           :snake {:extra-paths ["examples/snake"]
+                   :main-opts ["-m" "lev.snake-ui"]}}}
