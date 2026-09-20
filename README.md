@@ -33,6 +33,7 @@ adversarial authored144 (details in [bench/](bench/README.md)):
 | | AG News | BoolQ | SST-5 | authored144 | ms per question |
 |---|---|---|---|---|---|
 | encoder `english` | **97.5%** | 72.5% | 27.5% | 61% | **125** (CPU) |
+| encoder `english`, `debias` | | | | 64% | 199 (CPU) |
 | thinker, thinking off | 82.5% | 70.0% | 27.5% | 74% | 152 (GPU) |
 | thinker, thinking | 85.0% | **90.0%** | **37.5%** | **95%** | 3,000 (GPU) |
 
@@ -123,6 +124,7 @@ jolt prepare             # every checkpoint under ../laya -> data/, data/typed-d
 jolt -M:test             # parity suites vs golden/
 jolt -M:run demo         # README quickstart through the workflow runner
 jolt -M:serve            # HTTP API on http://127.0.0.1:8080
+jolt -M:calibrate --labels cases.jsonl --out calibration.edn   # refit an encoder's temperatures on your labeled traffic
 jolt binary              # standalone ./lev-server (kernels + llama.cpp linked in), self-tested against golden/
 ```
 
@@ -202,6 +204,31 @@ not built) is a 503, and `GET /v1/models` says which is which.
 `--workflows` and `LEV_WORKFLOWS` are the exception to "adds": they name
 exactly the directories to scan, replacing the defaults, so a test or a
 one-off run is isolated from whatever is in `~/.config/lev`.
+
+### Calibration
+
+The checkpoints' temperatures were fitted on their training data; on
+other traffic the probabilities can be far off (the english encoder's
+yes/no answers on BoolQ average 0.92 confidence at 72.5% accuracy, its
+20-way choices 0.99 at 35%). `jolt -M:calibrate` refits one temperature
+per (question type, option-count bucket) on labeled cases by NLL
+minimisation, reports NLL / ECE per bucket on a held-out half, and writes
+a file `config.edn :calibration {"english" "calibration.edn"}` (or
+`--calibration FILE` / `LEV_CALIBRATION`, for every encoder) loads over
+the checkpoint's own. A refit changes no answer — temperature scaling
+keeps every argmax — only how much `probabilities` and `confidence` mean,
+which is what the gate reads. Labeled cases are JSON lines:
+
+```json
+{"state": "...", "questions": {"q": {"type": "noul", "instructions": "..."}}, "labels": {"q": true}}
+```
+
+with a choice's option, a score's level index or a noul's boolean as the
+label. `bench/calib_data.py` builds 1,240 such cases from public datasets
+covering every bucket; on their held-out half the refit takes the
+20-way choice bucket's ECE from 0.57 to 0.10, 6-way from 0.47 to 0.17,
+score from 0.29 to 0.10, and on the in-distribution trio the encoder's
+ECE from 0.16 to 0.11 (`bench/README.md`).
 
 ### Thinkers
 
@@ -447,7 +474,16 @@ POST /v1/patterns/two-stage-choice  {"state", "taxonomy": {category: {option: de
 ```
 
 `escalate` also works on a workflow request; constraints then decide over
-the merged answers.
+the merged answers. `threshold` is a number for every question type or
+`{"choice": 0.8, "score": 0.8, "noul": 0.9}`: a noul's confidence is
+`max(p, 1 − p)`, never below 0.5, and on yes/no reading comprehension the
+encoder's is uninformative below ~0.9 (`bench/README.md`), so nouls want a
+higher bar. `"debias": true` asks every choice with three or more options
+once per rotation of its options, in the same batch, and averages the
+probabilities: 14% of the encoder's choices move under rotation, and
+averaging is +2.8 points and a lower ECE on `english` (unchanged on
+`typed-decisions`) at ~1.7× the time. When a state did not fit a
+question's sequence the body carries `"truncated": {qid: tokens dropped}`.
 `model` is either absent (or `lev`, or a TypeSafe SDK's default
 `jev-latest` / `jev-preview`) to route by content, a checkpoint name /
 alias (`english`, `multilingual`, `typed-decisions`, `en`, `ml`, ...) or a

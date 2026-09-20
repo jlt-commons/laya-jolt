@@ -21,3 +21,4 @@ lev-server
 *.db
 .beads-credential-key
 bench/data/triad120.jsonl
+bench/data/calib.jsonl

@@ -115,6 +115,35 @@ its seconds on the reading-comprehension and reasoning cases.
   the encoder's can (88% of these adversarial cases sit below 0.5, 12% of
   in-distribution AG News).
 
+## The fixes, measured (`lev.calibrate`, per-type thresholds, `debias`)
+
+`jolt -M:calibrate --labels bench/data/calib.jsonl` (1,240 public cases
+from `bench/calib_data.py`: SST-2, AG News, dair-ai/emotion, 20
+newsgroups, BoolQ, SST-5 — one per temperature bucket), fitted on the even
+cases, reported on the odd ones, `english`:
+
+| bucket | n | accuracy | T shipped → refit | NLL before → after | ECE before → after |
+|---|---|---|---|---|---|
+| choice:2 (SST-2) | 87 | 95.4% | 1.91 → 1.24 | 0.169 → 0.159 | 0.060 → 0.033 |
+| choice:3-5 (AG News) | 97 | 95.9% | 1.76 → 1.47 | 0.161 → 0.145 | 0.047 → 0.021 |
+| choice:6-10 (emotion) | 127 | 39.4% | 1.00 → 3.00 | 2.929 → 1.539 | 0.468 → 0.172 |
+| choice:11+ (20 newsgroups) | 104 | 39.4% | 0.10 → 1.48 | 11.02 → 2.06 | 0.567 → 0.103 |
+| noul:2 (BoolQ) | 104 | 77.9% | 1.98 → 2.70 | 0.534 → 0.476 | 0.114 → 0.090 |
+| score:3-5 (SST-5) | 101 | 35.6% | 1.25 → 4.02 | 2.002 → 1.458 | 0.290 → 0.101 |
+
+The shipped temperatures are sharp where the encoder is weakest (a 20-way
+choice at 35% accuracy reported ~1.0 confidence). On the trio the refit
+takes ECE 0.161 → 0.106 and the gate at 0.5 now escalates every SST-5 case
+(13/40 were kept before) while AG News keeps 38/40 at 97%. BoolQ does not
+move: the noul confidence floor is 0.5 and within the task confidence
+barely tracks correctness (kept accuracy 72% at ≥0.5, 79% at ≥0.9), so
+yes/no questions need their own, higher threshold — `threshold`
+{"noul": 0.9} — or, on traffic like this, escalating them outright (the
+thinker gets 90%).
+
+`--debias` through the runner: `english` 63.9%, ECE 0.082, 199 ms a case
+(the rotations share one batched forward).
+
 What the numbers say:
 
 - The gap to a hosted generative decision API on hard cases is the

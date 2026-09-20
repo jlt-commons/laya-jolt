@@ -213,3 +213,19 @@
         (is (= "t" (get (router/predict r "Refund me." q :model "t") "model")))
         (is (thrown-with-msg? Exception #"not prepared" (router/predict r "मुझसे दो बार" q))
             "the default is english (an encoder): no fallback for a Hindi state")))))
+
+(deftest a-calibration-file-is-applied-when-the-encoder-loads
+  (spit "target/router-cal.edn" (pr-str {:temperature-by-options {"noul:2" 0.25}}))
+  (let [seen (atom nil)
+        r (router/make-router {:models {"english" tu/data-dir}
+                               :calibrations {"english" "target/router-cal.edn"}
+                               :loader (fn [name dir limits] (reset! seen limits) (router/load-prepared name dir limits))})]
+    (router/load-model r "english")
+    (is (= "target/router-cal.edn" (:calibration @seen)) "the loader is told")
+    (is (= 0.25 (get-in @(:agents r) ["english" :cfg :temperature-by-options "noul:2"])) "and load-prepared applied it")
+    (is (= 1.7601518630981445 (get-in @(:agents r) ["english" :cfg :temperature-by-options "choice:3-5"])) "other buckets keep the checkpoint's"))
+  (jolt.host/delete-tree! "target/router-cal.edn")
+  (testing "a missing file is an error at load, naming it"
+    (let [r (router/make-router {:models {"english" tu/data-dir} :calibrations {"english" "target/nope.edn"}
+                                 :loader router/load-prepared})]
+      (is (thrown-with-msg? Exception #"nope.edn" (router/load-model r "english"))))))

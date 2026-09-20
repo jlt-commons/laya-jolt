@@ -11,6 +11,7 @@
     lev.llm-test
     lev.think-test
     lev.patterns-test
+    lev.calibrate-test
     workflows.email-test
     workflows.presets-test
     lev.lang-test

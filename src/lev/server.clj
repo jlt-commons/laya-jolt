@@ -6,12 +6,12 @@
     POST /v1/systemone        {\"state\" ..., \"questions\" {...},
                                \"constraints\"? [...], \"on_infeasible\"?,
                                \"model\"? \"lang\"? \"task\"?
-                               \"thinking\"? bool, \"thought\"? bool}
+                               \"thinking\"? bool, \"thought\"? bool, \"debias\"? bool}
                               -> {\"model\" \"english\", \"answers\" {...},
                                   \"usage\" {...}, \"thinking\"? {...},
                                   \"constraints\"? {...}, \"routing\" {...}}
                               with \"escalate\" {\"model\" thinker, \"threshold\"?
-                              0.8, \"thinking\"?}: the answers below the
+                              0.8 or {type: t}, \"thinking\"?}: the answers below the
                               threshold are re-asked on the thinker and the
                               body carries an \"escalation\" report (lev.patterns)
     POST /v1/route            same body, questions optional -> the routing
@@ -173,7 +173,9 @@
    (when (and (contains? body "constraints") (not (sequential? (get body "constraints"))))
      [(detail ["body" "constraints"] "constraints must be a list of constraints" "type_error")])
    (when (and (contains? body "on_infeasible") (not (contains? infeasible-modes (get body "on_infeasible"))))
-     [(detail ["body" "on_infeasible"] "on_infeasible must be min_violations or raise" "value_error")])))
+     [(detail ["body" "on_infeasible"] "on_infeasible must be min_violations or raise" "value_error")])
+   (when (and (contains? body "debias") (not (boolean? (get body "debias"))))
+     [(detail ["body" "debias"] "debias must be true or false" "type_error")])))
 
 (defn- check-escalate
   "escalate, when present, is an object naming a thinker under model,
@@ -190,9 +192,10 @@
              (not (try (router/thinker? rt m) (catch Exception _ false)))
              [(detail ["body" "escalate" "model"] (str "escalate.model must name a thinker: one of "
                                                        (str/join ", " (router/thinker-names rt))) "value_error")]))
-         (when (and (contains? e "threshold")
-                    (not (and (number? (get e "threshold")) (<= 0 (get e "threshold") 1))))
-           [(detail ["body" "escalate" "threshold"] "escalate.threshold must be a number in [0, 1]" "value_error")])
+         (when (contains? e "threshold")
+           (try (pat/thresholds (get e "threshold")) nil
+                (catch Exception ex
+                  [(detail ["body" "escalate" "threshold"] (str "escalate." (ex-message ex)) "value_error")])))
          (when (and (contains? e "thinking") (not (boolean? (get e "thinking"))))
            [(detail ["body" "escalate" "thinking"] "escalate.thinking must be true or false" "type_error")]))))))
 
@@ -236,6 +239,7 @@
      :on-infeasible (get body "on_infeasible")
      :thinking (get body "thinking")
      :thought (get body "thought")
+     :debias (get body "debias")
      :escalate (get body "escalate")}))
 
 (defn- predict
@@ -243,18 +247,18 @@
   the body has an escalate object), with the errors the decoder throws
   pointed at the request: a bad constraint at its index among the
   request's own (`offset` of them belong to the workflow)."
-  [rt lock state questions {:keys [model lang task constraints on-infeasible thinking thought escalate]} offset]
+  [rt lock state questions {:keys [model lang task constraints on-infeasible thinking thought debias escalate]} offset]
   (try (locking lock
          (if escalate
            (pat/escalate rt state questions
                          (cond-> {:model (get escalate "model") :fast-model model :lang lang :task task
                                   :constraints constraints :on-infeasible on-infeasible
-                                  :thought thought}
+                                  :thought thought :debias debias}
                            (contains? escalate "threshold") (assoc :threshold (get escalate "threshold"))
                            (contains? escalate "thinking") (assoc :thinking (get escalate "thinking"))))
            (router/predict rt state questions :model model :lang lang :task task
                            :constraints constraints :on-infeasible on-infeasible
-                           :thinking thinking :thought thought)))
+                           :thinking thinking :thought thought :debias debias)))
        (catch Exception e
          (if (= :invalid-constraint (:type (ex-data e)))
            (throw (ex-info (ex-message e) (assoc (ex-data e) :offset offset)))
@@ -337,8 +341,9 @@
     (case name
       "confidence-gate"
       (run (concat (check-request rt body)
-                   (when (and (contains? body "threshold") (not (number? (get body "threshold"))))
-                     [(detail ["body" "threshold"] "threshold must be a number in [0, 1]" "type_error")]))
+                   (when (contains? body "threshold")
+                     (try (pat/thresholds (get body "threshold")) nil
+                          (catch Exception ex [(detail ["body" "threshold"] (ex-message ex) "value_error")]))))
            #(pat/confidence-gate rt (get body "state") (get body "questions")
                                  (merge (routing) (opts "threshold" :threshold))))
       "composite-score"
@@ -505,7 +510,7 @@
                                :else (= a b)))
                 ;; the golden carries the Python package's own model name; lev
                 ;; reports the checkpoint's
-                answer-ok (and (approx (dissoc (json/read-str want) "model") (dissoc got "routing" "model"))
+                answer-ok (and (approx (dissoc (json/read-str want) "model") (dissoc got "routing" "model" "truncated"))
                                (= "english" (get got "model"))
                                (= "english" (get-in got ["routing" "model"])))
                 tok (:tok agent)
@@ -532,7 +537,7 @@
 (defn -main
   "jolt -M:serve [--data DIR] [--port N] [--host ADDR] [--api-key KEY]
                  [--max-loaded N] [--default-model NAME] [--workflows DIR[:DIR]]
-                 [--max-len N] [--head-max-len N] [--thinker PATH.gguf] [--max-thinkers N]
+                 [--max-len N] [--head-max-len N] [--thinker PATH.gguf] [--max-thinkers N] [--calibration FILE]
    Each falls back to an environment variable (LEV_DATA, PORT, LEV_HOST,
    LEV_API_KEY, LEV_MAX_LOADED, LEV_DEFAULT_MODEL, LEV_WORKFLOWS,
    LEV_MAX_LEN, LEV_HEAD_MAX_LEN, LEV_THINKER, LEV_MAX_THINKERS), then to
@@ -558,7 +563,8 @@
                                                          (true? (:auto-task-detection (:config ctx))))
                                 ;; cfg/limits resolves CLI > env > config per name; the
                                 ;; router keeps the per-checkpoint results
-                                :checkpoints (into {} (map (fn [n] [n (cfg/limits ctx n)])) router/names)})
+                                :checkpoints (into {} (map (fn [n] [n (cfg/limits ctx n)])) router/names)
+                                :calibrations (cfg/calibrations ctx)})
         log (fn [& xs] (binding [*out* *err*] (apply println "lev:" xs)))
         t0 (System/nanoTime)
         every-model (concat router/names (router/thinker-names rt))

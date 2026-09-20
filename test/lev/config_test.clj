@@ -101,3 +101,12 @@
     (is (= {"english" "/models/en" "multilingual" "/models/ml"}
            (cfg/encoders {:opts {} :env {} :config {:encoders {:english "/models/en" "multilingual" "/models/ml"}}})))
     (is (= {} (cfg/encoders {:opts {} :env {} :config {}})))))
+
+(deftest calibrations-from-config
+  (testing "config.edn :calibration names a calibration file per encoder; --calibration / LEV_CALIBRATION apply one to every encoder"
+    (is (= {"english" "/c/en.edn"} (cfg/calibrations {:opts {} :env {} :config {:calibration {:english "/c/en.edn"}}})))
+    (is (= {"english" "/c/all.edn" "multilingual" "/c/all.edn" "typed-decisions" "/c/all.edn"}
+           (cfg/calibrations {:opts {"--calibration" "/c/all.edn"} :env {} :config {:calibration {:english "/c/en.edn"}}})))
+    (is (= {"english" "/c/env.edn" "multilingual" "/c/env.edn" "typed-decisions" "/c/env.edn"}
+           (cfg/calibrations {:opts {} :env {"LEV_CALIBRATION" "/c/env.edn"} :config {}})))
+    (is (= {} (cfg/calibrations {:opts {} :env {} :config {}})))))

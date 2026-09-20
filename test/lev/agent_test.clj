@@ -104,7 +104,7 @@
           ;; Python's calibrated softmax runs in float32, ours in doubles: a
           ;; probability within ~1e-7 of a 4-decimal boundary may round to
           ;; the neighbouring digit, so allow one unit in the last place.
-          (is (tu/approx= 1.0001e-4 (dissoc want "model") (dissoc got "model")) (str "body " body-index)))))))
+          (is (tu/approx= 1.0001e-4 (dissoc want "model") (dissoc got "model" "truncated")) (str "body " body-index)))))))
 
 (deftest wide-choice-keeps-option-order
   (testing "past 8 options (and 8 questions) the answer maps must still follow input order"
@@ -243,3 +243,34 @@
         (is (= 0 (:index (ex-data e))))
         (is (re-find #"\"legal\" is not an option of \"department\"" (ex-message e))))
       (is (thrown-with-msg? Exception #"list" (ag/system-one @agent state questions {:constraints {"a" 1}}))))))
+
+(deftest answers-say-when-the-state-was-cut
+  (let [q {"q" {"type" "noul" "instructions" "Is it long?"}}
+        short (ag/system-one @agent {"body" "short"} q)
+        long-state {"body" (apply str (repeat 600 "word "))}
+        cut (ag/system-one @agent long-state q)]
+    (testing "a state that fits leaves nothing behind: no key"
+      (is (not (contains? short "truncated"))))
+    (testing "a state cut to max_len names the questions and the tokens dropped, after usage"
+      (is (= ["model" "answers" "usage" "truncated"] (keys cut)))
+      (is (= ["q"] (keys (get cut "truncated"))))
+      (is (< 50 (get-in cut ["truncated" "q"]) 700))
+      (is (= 512 (get-in cut ["usage" "input_tokens"]))))))
+
+(deftest debias-averages-a-choice-over-its-option-rotations
+  ;; 20 of 144 authored144 answers change under option rotation (bench/);
+  ;; averaging the calibrated probabilities over every rotation is +2.8
+  ;; points on english and lowers its ECE, at k forwards per question
+  (let [plain (ag/system-one @agent state questions)
+        out (ag/system-one @agent state questions {:debias true})
+        a (get out "answers")]
+    (is (= ["model" "answers" "usage" "debias"] (keys out)))
+    (is (= {"department" 4} (get out "debias")) "only choices with 3+ options rotate; score and noul do not")
+    (is (= ["billing" "technical" "sales" "other"] (keys (get-in a ["department" "probabilities"]))) "option order is the caller's")
+    (is (< (Math/abs (- 1.0 (reduce + (vals (get-in a ["department" "probabilities"]))))) 2e-4))
+    (is (not= (get-in plain ["answers" "department" "probabilities"]) (get-in a ["department" "probabilities"])))
+    (is (= "billing" (get-in a ["department" "choice"])))
+    (is (= (get-in plain ["answers" "urgency"]) (get a "urgency")) "a score is untouched")
+    (is (= (get-in plain ["answers" "churn_risk"]) (get a "churn_risk")) "a noul is untouched")
+    (testing "usage counts every sequence that ran"
+      (is (> (get-in out ["usage" "input_tokens"]) (get-in plain ["usage" "input_tokens"]))))))

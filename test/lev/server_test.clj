@@ -411,6 +411,12 @@
         (is (= ["body" "escalate" "model"] (loc (second (post "/v1/systemone" (assoc base "escalate" {"threshold" 0.5}))))))
         (is (= ["body" "escalate" "model"] (loc (second (post "/v1/systemone" (assoc base "escalate" {"model" "english"}))))))
         (is (= ["body" "escalate" "threshold"] (loc (second (post "/v1/systemone" (assoc base "escalate" {"model" "slow" "threshold" 2}))))))
+        (is (= ["body" "escalate" "threshold"] (loc (second (post "/v1/systemone" (assoc base "escalate" {"model" "slow" "threshold" {"bool" 0.5}}))))))
+        (let [[st b] (post "/v1/systemone" (assoc base "escalate" {"model" "slow" "threshold" {"noul" 0.99 "choice" 0.0}}))]
+          (is (= 200 st))
+          (is (= {"choice" 0.0 "score" 0.8 "noul" 0.99} (get-in b ["escalation" "threshold"])))
+          (is (contains? (set (get-in b ["escalation" "escalated"])) "churn_risk"))
+          (is (not (contains? (set (get-in b ["escalation" "escalated"])) "department"))))
         (is (= ["body" "escalate"] (loc (second (post "/v1/systemone" (assoc base "escalate" "slow"))))))))
     (testing "the patterns as endpoints"
       (let [[st b] (post "/v1/patterns/confidence-gate" (assoc base "threshold" 0.6))]
@@ -435,3 +441,15 @@
         (is (= 422 (first (post "/v1/patterns/composite-score" (assoc base "weights" [1 2])))))
         (is (= 422 (first (post "/v1/patterns/confidence-gate" (assoc base "threshold" "high")))))
         (is (= 404 (first (post "/v1/patterns/nope" base))))))))
+
+(deftest debias-on-the-wire
+  (let [h (srv/handler @agent {})
+        base (json/read-str (readme-request))
+        post (fn [body] (call h (req :post "/v1/systemone" :body (seq/json-str body))))]
+    (let [[st b] (post (assoc base "debias" true))]
+      (is (= 200 st))
+      (is (= {"department" 4} (get b "debias")))
+      (is (= ["model" "answers" "usage" "debias" "routing"] (keys b))))
+    (let [[st b] (post (assoc base "debias" "yes"))]
+      (is (= 422 st))
+      (is (= ["body" "debias"] (get-in b ["detail" 0 "loc"]))))))

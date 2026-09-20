@@ -95,15 +95,22 @@
 
 (defn load-prepared
   "The default loader: lev.agent/load-agent on a prepared data directory,
-  with the sequence limits configured for that checkpoint. Throws
-  {:type :model-unavailable} when there is nothing there."
+  with the sequence limits configured for that checkpoint and, under
+  :calibration, a lev.calibrate file applied over the checkpoint's
+  temperatures. Throws {:type :model-unavailable} when there is nothing
+  there."
   ([name dir] (load-prepared name dir nil))
   ([name dir limits]
    (when-not (and dir (.exists (clojure.java.io/file dir "manifest.edn")))
      (throw (ex-info (str "checkpoint " name " is not prepared (no " dir "/manifest.edn); "
                           "run jolt prepare for it or point :models at its data directory")
                      {:type :model-unavailable :model name :dir dir})))
-   (ag/load-agent dir (assoc limits :name name))))
+   (let [agent (ag/load-agent dir (assoc (dissoc limits :calibration) :name name))]
+     (if-let [path (:calibration limits)]
+       (do (when-not (.exists (clojure.java.io/file path))
+             (throw (ex-info (str "calibration file " path " for " name " does not exist") {:type :model-unavailable :model name :file path})))
+           (ag/with-calibration agent (clojure.edn/read-string (slurp path))))
+       agent))))
 
 (defn make-router
   "Options: :models {name data-dir} (default (default-models \"data\")),
@@ -111,11 +118,12 @@
   checkpoint (\"english\"), :auto-task-detection (false), :limits
   {:max-len :head-max-len} for every checkpoint and :checkpoints {name
   {...}} per checkpoint (lev.config/limits builds these from config.edn),
+  :calibrations {name path} (lev.calibrate files, lev.config/calibrations),
   :loader (fn [name dir limits] agent) for tests (default load-prepared);
   :thinkers {name lev.think config} (lev.config/thinkers), :max-thinkers
   (default 1), :thinker-loader (fn [name cfg] agent) for tests (default
   lev.think/thinker)."
-  [{:keys [models data max-loaded default auto-task-detection loader limits checkpoints
+  [{:keys [models data max-loaded default auto-task-detection loader limits checkpoints calibrations
            thinkers max-thinkers thinker-loader]
     :or {max-loaded 1 default "english" auto-task-detection false max-thinkers 1}}]
   {:models (into (default-models (or data "data"))
@@ -126,6 +134,7 @@
    :auto-task-detection (boolean auto-task-detection)
    :limits (or limits {})
    :checkpoints (into {} (map (fn [[k v]] [(normalise-name k) v])) checkpoints)
+   :calibrations (into {} (map (fn [[k v]] [(normalise-name k) v])) calibrations)
    :loader (or loader load-prepared)
    :thinkers (into {} (map (fn [[k v]] [(if (keyword? k) (name k) (str k)) v])) thinkers)
    :max-thinkers (max 1 (long max-thinkers))
@@ -138,9 +147,12 @@
 
 (defn limits-for
   "The configured sequence limits for one checkpoint: the router-wide ones
-  under its per-checkpoint entry."
+  under its per-checkpoint entry, plus its :calibration file when one is
+  configured."
   [router name]
-  (merge (:limits router) (get (:checkpoints router) (normalise-name router name))))
+  (let [key (normalise-name router name)]
+    (cond-> (merge (:limits router) (get (:checkpoints router) key))
+      (get (:calibrations router) key) (assoc :calibration (get (:calibrations router) key)))))
 
 (defn effective-limits
   "{:max-len :head-max-len} the checkpoint runs with: its prepared config.edn
@@ -151,7 +163,7 @@
         f (clojure.java.io/file dir "config.edn")]
     (when (and dir (.exists f))
       (let [cfg (clojure.edn/read-string (slurp f))]
-        (merge (select-keys cfg [:max-len :head-max-len]) (limits-for router key))))))
+        (merge (select-keys cfg [:max-len :head-max-len]) (dissoc (limits-for router key) :calibration))))))
 
 (defn preloaded
   "A router that already holds `agent` as checkpoint `name` (default
@@ -338,11 +350,12 @@
   :on-infeasible go to agent/system-one; :thinking / :thought to a thinker.
   A content-routed model that is not available falls back to the default
   (resolve-decision)."
-  [router state questions & {:keys [model task lang constraints on-infeasible thinking thought]}]
+  [router state questions & {:keys [model task lang constraints on-infeasible thinking thought debias]}]
   (let [d (resolve-decision router (route router state questions :model model :task task :lang lang) (some? model))
         agent (load-model router (get d "model"))]
     (assoc (ag/system-one agent state questions
                           (cond-> {:constraints constraints :on-infeasible on-infeasible}
                             (some? thinking) (assoc :thinking thinking)
-                            (some? thought) (assoc :thought thought)))
+                            (some? thought) (assoc :thought thought)
+                            (some? debias) (assoc :debias debias)))
            "routing" d)))

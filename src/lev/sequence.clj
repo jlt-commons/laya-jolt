@@ -144,7 +144,9 @@
     (str (qtype-names qtype) ":" size)))
 
 (defn build-sequence
-  "Returns [ids markers]: token ids and the [MASK] marker positions."
+  "Returns [ids markers dropped]: token ids, the [MASK] marker positions,
+  and how many of the state's tokens did not fit in max-len (0 when the
+  state is read whole)."
   [tok state q max-len head-max-len]
   (let [mask (tk/mask-token tok)
         sp (:specials tok)
@@ -169,6 +171,8 @@
                               opt-ids)
         ids (conj ids (:sep sp))
         room (max 0 (- max-len (count ids) 1))
-        st (vec (take room (tk/encode tok (str/replace (serialize-state state) mask " "))))]
+        st-all (tk/encode tok (str/replace (serialize-state state) mask " "))
+        st (vec (take room st-all))]
     [(vec (take max-len (into ids (conj st (:sep sp)))))
-     (filterv #(< % max-len) markers)]))
+     (filterv #(< % max-len) markers)
+     (- (count st-all) (count st))]))

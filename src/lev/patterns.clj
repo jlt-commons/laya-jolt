@@ -17,23 +17,39 @@
 
 (defn- key-str [k] (if (keyword? k) (name k) (str k)))
 
-(defn- check-threshold [t]
-  (when-not (and (number? t) (<= 0.0 (double t) 1.0))
-    (throw (ex-info (str "threshold must be in [0, 1]; got " (pr-str t)) {:type :invalid-request :field "threshold"})))
-  (double t))
+(def default-threshold 0.8)
 
-(defn- confident? [answer threshold]
-  (>= (double (get answer "confidence" 1.0)) threshold))
+(defn thresholds
+  "The threshold per question type from a number (every type) or a map
+  {type threshold} (a type left out gets the default 0.8): {\"choice\" t
+  \"score\" t \"noul\" t}. Throws {:type :invalid-request} on anything else."
+  [t]
+  (let [bad (fn [what] (throw (ex-info (str "threshold must be a number in [0, 1] or {type: number}; " what)
+                                       {:type :invalid-request :field "threshold"})))
+        ok? (fn [x] (and (number? x) (<= 0.0 (double x) 1.0)))]
+    (cond
+      (nil? t) (thresholds default-threshold)
+      (number? t) (if (ok? t) (zipmap ["choice" "score" "noul"] (repeat (double t))) (bad (str "got " (pr-str t))))
+      (map? t) (do (doseq [[k v] t]
+                     (when-not (contains? #{"choice" "score" "noul"} (key-str k)) (bad (str "unknown type " (pr-str k))))
+                     (when-not (ok? v) (bad (str "got " (pr-str v) " for " (pr-str k)))))
+                   (into {} (map (fn [type] [type (double (get t type (get t (keyword type) default-threshold)))])
+                                 ["choice" "score" "noul"])))
+      :else (bad (str "got " (pr-str t))))))
+
+(defn- confident? [answer ths]
+  (>= (double (get answer "confidence" 1.0)) (get ths (get answer "type") default-threshold)))
 
 (defn confidence-gate
-  "Selective automation: the answers at or above :threshold (0.8) under
-  \"automatic\", the rest under \"escalate\", the whole response under
-  \"response\". Other opts go to lev.api/system-one."
-  [agent state questions {:keys [threshold] :or {threshold 0.8} :as opts}]
-  (let [threshold (check-threshold threshold)
+  "Selective automation: the answers at or above :threshold (0.8; a
+  number, or {type threshold} — see `thresholds`) under \"automatic\",
+  the rest under \"escalate\", the whole response under \"response\".
+  Other opts go to lev.api/system-one."
+  [agent state questions {:keys [threshold] :as opts}]
+  (let [ths (thresholds threshold)
         resp (api/system-one agent state questions (dissoc opts :threshold))
         [auto esc] (reduce (fn [[a e] [qid answer]]
-                             (if (confident? answer threshold)
+                             (if (confident? answer ths)
                                [(conj a [qid answer]) e]
                                [a (conj e [qid answer])]))
                            [[] []] (get resp "answers"))]
@@ -48,15 +64,14 @@
   escalated ones are the thinker's, and an \"escalation\" report names
   them with the thinker's usage. :constraints / :on-infeasible decide
   over the merged answers. Needs a router."
-  [rt state questions {:keys [threshold model fast-model lang task thinking thought constraints on-infeasible]
-                       :or {threshold 0.8}}]
+  [rt state questions {:keys [threshold model fast-model lang task thinking thought debias constraints on-infeasible]}]
   (when-not (router/router? rt)
     (throw (ex-info "escalation needs a router (the thinker is named by model)" {:type :invalid-request})))
-  (let [threshold (check-threshold threshold)
+  (let [ths (thresholds threshold)
         model (router/normalise-name rt (or model (throw (ex-info "escalate: :model (the thinker) is required"
                                                                  {:type :invalid-request :field "model"}))))
-        fast (router/predict rt state questions :model fast-model :lang lang :task task)
-        unsure (vec (keep (fn [[qid a]] (when-not (confident? a threshold) qid)) (get fast "answers")))
+        fast (router/predict rt state questions :model fast-model :lang lang :task task :debias debias)
+        unsure (vec (keep (fn [[qid a]] (when-not (confident? a ths) qid)) (get fast "answers")))
         unsure-set (set unsure)
         slow (when (seq unsure)
                (router/predict rt state (seq/ordered-map (filter (fn [[qid _]] (contains? unsure-set (key-str qid))) questions))
@@ -76,7 +91,7 @@
      (concat [["model" (get fast "model")]
               ["answers" answers]
               ["usage" (get fast "usage")]
-              ["escalation" (seq/ordered-map [["threshold" threshold]
+              ["escalation" (seq/ordered-map [["threshold" (if (and (number? threshold) (apply = (vals ths))) (double threshold) (seq/ordered-map (map (fn [t] [t (get ths t)]) ["choice" "score" "noul"])))]
                                               ["model" model]
                                               ["escalated" unsure]
                                               ["usage" (or (get slow "usage") (array-map "input_tokens" 0 "output_tokens" 0))]])]]

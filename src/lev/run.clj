@@ -110,7 +110,8 @@
         (let [model (get opts "--model" "english")
               rt (router/make-router {:data (cfg/setting ctx "--data" "LEV_DATA" :data "data")
                                       :thinkers (cfg/thinkers ctx)
-                                      :checkpoints (into {} (map (fn [n] [n (cfg/limits ctx n)])) router/names)})
+                                      :checkpoints (into {} (map (fn [n] [n (cfg/limits ctx n)])) router/names)
+                                :calibrations (cfg/calibrations ctx)})
               agent (router/load-model rt model)
               extra (when (contains? opts "--thinking") {:thinking (= "true" (str (get opts "--thinking")))})]
           (println (seq/json-str (if (one-offs name)

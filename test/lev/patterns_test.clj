@@ -169,3 +169,20 @@
     (is (= "gcp" (get out "choice")))
     (is (= ["category" "category_confidence" "choice" "choice_confidence" "combined_confidence"] (keys out)))
     (is (= (ag/round4 (* (get out "category_confidence") (get out "choice_confidence"))) (get out "combined_confidence")))))
+
+(deftest thresholds-can-be-per-question-type
+  ;; the encoder's noul confidence is max(p, 1-p): never below 0.5 and, on
+  ;; yes/no reading comprehension, uninformative below ~0.9 (bench/), so a
+  ;; gate wants a higher bar for nouls than for choices
+  (testing "a map of thresholds by type; a missing type gets the default 0.8"
+    (let [{:strs [automatic escalate]} (pat/confidence-gate fast "s" questions {:threshold {"choice" 0.0 "noul" 0.9}})]
+      ;; intent 0.06 conf passes at 0.0; is_urgent 0.55 fails 0.9; frustration 0.42 fails the default 0.8
+      (is (= ["intent"] (keys automatic)))
+      (is (= ["is_urgent" "frustration"] (keys escalate)))))
+  (testing "escalation reports the thresholds it used"
+    (let [out (pat/escalate (rt) "Refund me" questions {:threshold {"choice" 0.0 "noul" 0.9} :model "slow"})]
+      (is (= {"choice" 0.0 "score" 0.8 "noul" 0.9} (get-in out ["escalation" "threshold"])))
+      (is (= ["is_urgent" "frustration"] (get-in out ["escalation" "escalated"])))))
+  (testing "a bad type or value is refused"
+    (is (thrown-with-msg? Exception #"threshold" (pat/confidence-gate fast "s" questions {:threshold {"noul" 2}})))
+    (is (thrown-with-msg? Exception #"threshold" (pat/confidence-gate fast "s" questions {:threshold {"bool" 0.5}})))))

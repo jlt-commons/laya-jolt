@@ -123,11 +123,11 @@
           (is (= (into {} (map (fn [[k a]] [k (get a "choice")]) (get want "answers")))
                  (into {} (map (fn [[k a]] [k (get a "choice")]) (get got "answers")))))
           ;; float32 softmax in numpy vs doubles here: one unit in the last place
-          (is (tu/approx= 1.0001e-4 (dissoc want "model") (dissoc got "model")))))
+          (is (tu/approx= 1.0001e-4 (dissoc want "model") (dissoc got "model" "truncated")))))
       (testing (str n ": email fan-out")
         (let [g (golden n "email_answers")
               bodies (mapv first (:clean (tu/read-golden "email")))]
           (doseq [{:keys [body-index state result]} (:cases g)]
             (let [want (json/read-str result)
                   got (json/read-str (seq/json-str (ag/system-one ag* state (:questions g))))]
-              (is (tu/approx= 1.0001e-4 (dissoc want "model") (dissoc got "model")) (str n " body " body-index)))))))))
+              (is (tu/approx= 1.0001e-4 (dissoc want "model") (dissoc got "model" "truncated")) (str n " body " body-index)))))))))

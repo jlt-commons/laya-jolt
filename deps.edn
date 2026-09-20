@@ -136,4 +136,5 @@
                   :main-opts ["-m" "lev.test-runner"]}
            :run {:main-opts ["-m" "lev.run"]}
            :prepare {:main-opts ["-m" "lev.prepare"]}
-           :serve {:main-opts ["-m" "lev.server"]}}}
+           :serve {:main-opts ["-m" "lev.server"]}
+           :calibrate {:main-opts ["-m" "lev.calibrate"]}}}

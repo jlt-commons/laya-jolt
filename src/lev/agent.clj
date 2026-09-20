@@ -226,32 +226,50 @@
   (default: the fewest violated constraints, then the best score) or
   `raise` (ex-info {:type :infeasible :violations [...]}). A bad
   constraint is ex-info {:type :invalid-constraint :index i}, thrown
-  before any inference. A thinker agent (lev.think) takes :thinking and
-  :thought as well."
+  before any inference. When the state did not fit a question's sequence
+  the result carries \"truncated\" {qid tokens-dropped}. A thinker agent
+  (lev.think) takes :thinking and :thought as well."
   ([agent state questions] (system-one agent state questions nil))
   ([agent state questions opts] (system-one* agent state questions opts)))
 
-(defmethod system-one* :encoder
-  [agent state questions {:keys [constraints on-infeasible]}]
+(defn with-calibration
+  "The agent with refitted temperatures (lev.calibrate's {:temperature
+  [per type] :temperature-by-options {bucket T}}) over the checkpoint's
+  own, bucket by bucket."
+  [agent {:keys [temperature temperature-by-options]}]
+  (cond-> agent
+    temperature (assoc-in [:cfg :temperature] (vec temperature))
+    temperature-by-options (update-in [:cfg :temperature-by-options] merge temperature-by-options)))
+
+(defn temperature-for
+  "The calibration temperature for a question type and option count: the
+  (type, count-bucket) entry, else the type's. max(1e-3, T): a degenerate
+  fitted temperature saturates the softmax instead of dividing by zero."
+  [cfg qtype k]
+  (max 1e-3 (double (get (:temperature-by-options cfg)
+                         (seq/temp-bucket qtype k)
+                         (nth (:temperature cfg) qtype)))))
+
+(defn encoder-forward
+  "The encoder on state + questions, before calibration: one map per
+  question, in order — {:qid :qdef :q :qtype :k :logits (the k option
+  logits) :act (the act head's two) :tokens :dropped (state tokens that
+  did not fit)}. What system-one calibrates and lev.calibrate refits on."
+  [agent state questions]
   (let [{:keys [cfg tok w]} agent
-        qids (vec (keys questions))
-        prepared (mapv (fn [qid]
-                         (let [qdef (validate-question qid (get questions qid))
+        prepared (mapv (fn [[qid qdef]]
+                         (let [qdef (validate-question qid qdef)
                                q (to-internal qdef)
-                               [ids markers] (seq/build-sequence tok state q
-                                                                 (:max-len cfg)
-                                                                 (:head-max-len cfg))]
+                               [ids markers dropped] (seq/build-sequence tok state q (:max-len cfg) (:head-max-len cfg))]
                            (when (not= (count markers) (count (seq/render-options q)))
-                             (throw (ex-info (format "question %s: options do not fit in head_max_len=%d tokens"
-                                                     (pr-str qid) (:head-max-len cfg))
-                                             {:type :invalid-question :qid qid :field "criteria"
-                                              :head-max-len (:head-max-len cfg)})))
-                           {:qid qid :qdef qdef :q q :ids ids :markers markers :qtype (seq/qtypes (:t q))}))
-                       qids)
-        ;; the constraints are checked against the questions before the
-        ;; forward pass, so a bad one costs nothing
-        cs (prepare-constraints (map (fn [{:keys [qid qdef]}] [qid qdef]) prepared) constraints)
-        n-tokens (reduce + (map #(count (:ids %)) prepared))
+                             ;; a debias rotation's id is [qid r]: name the question
+                             (let [shown (if (vector? qid) (first qid) qid)]
+                               (throw (ex-info (format "question %s: options do not fit in head_max_len=%d tokens"
+                                                       (pr-str shown) (:head-max-len cfg))
+                                               {:type :invalid-question :qid shown :field "criteria"
+                                                :head-max-len (:head-max-len cfg)}))))
+                           {:qid qid :qdef qdef :q q :ids ids :markers markers :qtype (seq/qtypes (:t q)) :dropped dropped}))
+                       questions)
         ;; the questions share every gemm of the forward, in batches of at
         ;; most max-batch rows so the workspace stays a few hundred MB
         outputs (mapcat (fn [chunk]
@@ -261,18 +279,62 @@
                                                     :markers markers :marker-mask (vec (repeat (count markers) 1))
                                                     :qtype qtype})
                                                  chunk)))
-                        (partition-all max-batch prepared))
-        calibrated (mapv (fn [{:keys [qtype markers]} [logits act]]
-                           (let [k (count markers)
-                                 ;; max(1e-3, t_scale): a degenerate fitted temperature
-                                 ;; saturates the softmax instead of dividing by zero
-                                 temp (max 1e-3 (double (get (:temperature-by-options cfg)
-                                                             (seq/temp-bucket qtype k)
-                                                             (nth (:temperature cfg) qtype))))]
-                             {:k k
-                              :p (softmax (mapv #(/ (double %) temp) (take k logits)))
-                              :actp (first (softmax act))}))
-                         prepared outputs)
+                        (partition-all max-batch prepared))]
+    (mapv (fn [{:keys [markers ids] :as pq} [logits act]]
+            (let [k (count markers)]
+              (-> (dissoc pq :ids :markers)
+                  (assoc :k k :logits (vec (take k logits)) :act (vec act) :tokens (count ids)))))
+          prepared outputs)))
+
+(defn- rotations
+  "The choice question `qdef` with its options rotated r places, for r in
+  0..k-1 (a rotation keeps every option's description)."
+  [qdef]
+  (let [crit (qget qdef :criteria)
+        pairs (if (map? crit) (vec crit) (mapv (fn [c] [c nil]) crit))
+        k (count pairs)]
+    (mapv (fn [r] (assoc qdef (if (contains? qdef :criteria) :criteria "criteria")
+                         (seq/ordered-map (concat (drop r pairs) (take r pairs)))))
+          (range k))))
+
+(defn- rotate-back
+  "p over a rotation's option order, put back in the caller's order."
+  [p r k]
+  (mapv (fn [i] (nth p (mod (- i r) k))) (range k)))
+
+(defmethod system-one* :encoder
+  [agent state questions {:keys [constraints on-infeasible debias]}]
+  (let [{:keys [cfg]} agent
+        ;; the questions and constraints are checked before the forward
+        ;; pass, so a bad one costs nothing
+        validated (mapv (fn [[qid qdef]] [qid (validate-question qid qdef)]) questions)
+        cs (prepare-constraints validated constraints)
+        ;; :debias: a choice with 3+ options runs once per rotation of its
+        ;; options, all in the same batch, and its probabilities are the
+        ;; average (bench/: 14% of answers move under rotation; averaging
+        ;; is +2.8 points and a lower ECE on english)
+        rotated? (fn [qdef] (and debias (= "choice" (qget qdef :type)) (>= (count (qget qdef :criteria)) 3)))
+        expanded (vec (mapcat (fn [[qid qdef]]
+                                (if (rotated? qdef)
+                                  (map-indexed (fn [r q] [[qid r] q]) (rotations qdef))
+                                  [[[qid 0] qdef]]))
+                              validated))
+        forwards (encoder-forward agent state expanded)
+        n-tokens (reduce + (map :tokens forwards))
+        by-qid (group-by (fn [f] (first (:qid f))) forwards)
+        prepared (mapv (fn [[qid qdef]]
+                         (let [fs (get by-qid qid)
+                               base (assoc (first fs) :qid qid :qdef qdef)]
+                           (assoc base :rotations (count fs)
+                                  :ps (mapv (fn [f] (rotate-back (softmax (mapv #(/ (double %) (temperature-for cfg (:qtype f) (:k f))) (:logits f)))
+                                                                 (second (:qid f)) (:k f)))
+                                            fs))))
+                       validated)
+        calibrated (mapv (fn [{:keys [k ps act]}]
+                           {:k k
+                            :p (mapv (fn [i] (/ (reduce + (map #(nth % i) ps)) (count ps))) (range k))
+                            :actp (first (softmax act))})
+                         prepared)
         solution (when cs
                    (decide-constraints cs (map (fn [{:keys [qid q]} {:keys [p]}] [qid q p]) prepared calibrated)
                                        on-infeasible))
@@ -280,9 +342,15 @@
                  (map (fn [{:keys [qid q]} {:keys [k p actp]}]
                         [qid (typed-answer q p k (when solution (decided-label cs solution qid))
                                            [["action" (array-map "act_probability" (round4 actp))]])])
-                      prepared calibrated))]
+                      prepared calibrated))
+        ;; the state is cut from the end to fit max_len, silently otherwise:
+        ;; say so per question, with how much did not fit
+        truncated (seq/ordered-map (keep (fn [{:keys [qid dropped]}] (when (pos? dropped) [qid dropped])) prepared))
+        debiased (seq/ordered-map (keep (fn [{:keys [qid rotations]}] (when (> rotations 1) [qid rotations])) prepared))]
     (seq/ordered-map
      (concat [["model" (:name agent "encoder")]
               ["answers" answers]
               ["usage" (array-map "input_tokens" n-tokens "output_tokens" 0)]]
+             (when (seq truncated) [["truncated" truncated]])
+             (when (seq debiased) [["debias" debiased]])
              (when solution [["constraints" (constraints-report cs solution)]])))))

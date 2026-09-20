@@ -53,7 +53,8 @@
   [want got & [msg]]
   ;; the goldens carry the Python package's own model name; lev reports the
   ;; checkpoint's name (english, ...) or "encoder" for an agent loaded alone
-  (is (approx= 1.0001e-4 (dissoc (json/read-str want) "model") (dissoc (json/read-str got) "model"))
+  ;; and "truncated" is lev's own addition (the Python package cuts silently)
+  (is (approx= 1.0001e-4 (dissoc (json/read-str want) "model") (dissoc (json/read-str got) "model" "truncated"))
       (or msg "answers within 1e-4")))
 
 (defn relative-max-abs
