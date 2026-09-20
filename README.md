@@ -1,32 +1,27 @@
-# lev
+# Lev
 
-lev serves System One decisions from one binary. You pass typed questions
-over a state, and each answer comes back with calibrated probabilities. It
+Lev is a System One decision engine which accepts typed questions
+over a state, and answers with calibrated probabilities. It
 runs on [jolt](https://github.com/jolt-lang/jolt), which hosts Clojure on
-Chez Scheme, so there is no JVM to ship. Two kinds of model sit behind the
-same API:
+Chez Scheme.
+
+Two kinds of model sit behind Lev API:
 
 - **the encoders**: ModernBERT-large / mmBERT-base with a decision head,
-  from the `convaiinnovations/laya` checkpoints on the Hub, three of them.
-  One forward pass covers all of a call's questions, at roughly 100 ms on
-  a laptop CPU, and the probabilities are calibrated. The whole engine
-  reproduces the checkpoints' own Python package to the fourth decimal.
-- **a thinker**: any GGUF chat model through llama.cpp, linked into the
-  binary. It reads the state and the question, thinks, then has its
-  candidate answers scored by their token log probabilities. That costs
-  seconds a question, and it is right where the encoders are not. On the
+  from the `convaiinnovations/laya` checkpoints on the Hub.
+  These use one forward pass covers all of a call's questions, at roughly 100 ms on
+  a laptop CPU, and the probabilities are calibrated.
+- **a thinker**: any GGUF chat model through a linked llama.cpp.
+  It reads the state and the question, thinks, then has its
+  candidate answers scored by their token log probabilities. On the
   adversarial authored144 set in [bench/](bench/README.md), MiniCPM5-2B
   answers 95% with thinking, against the encoders' 61 to 67%.
 
 A request either names its model, like `"model": "english"` or
 `"model": "minicpm5"`, or gets routed by content to an encoder. A
 confidence gate can answer on the encoder first, then escalate only what
-it is unsure about to the thinker. Either kind can be configured alone: a
-box with only encoders serves them, a box with only a thinker routes
-everything to it. Constraints tie a call's questions together, workflows
-package a use case, and von's composable patterns for route, composite
-score and two-stage choice, plus its `decide`/`judge`/`rate`, are there as
-a library and over HTTP.
+it is unsure about to the thinker. Either kind can be configured individually
+in the configuration. You can configure just the encoders, or only a thinking model.
 
 Which one should answer, and when? The numbers below come from a
 120-case in-distribution set made of AG News, BoolQ and SST-5, the trio
@@ -42,27 +37,17 @@ in [bench/](bench/README.md):
 
 The encoder is the fast path. On routing-style traffic it beats the 2.5B
 model answering at once, at a fraction of the cost on a CPU, batching a
-whole workflow into one forward. Its confidence means something, because
-the calibration is fitted and the gate relies on it. The thinker earns
-its seconds on the cases that need a deduction or an abstention.
+whole workflow into one forward pass. Its confidence means is based on
+the calibration which the gate relies on. The thinker is used for
+the cases that need a deduction or an abstention.
 
 The encoders are f32 end to end. F16 checkpoint weights are widened once,
 during `prepare`, so the numerics match the torch CPU oracle.
 
-Naming: the project was `laya-jolt` until 2026-09-19. The namespaces are
-`lev.*`, the binary is `lev-server`, the config lives under
-`~/.config/lev`, and the environment variables are `LEV_*`. The
-checkpoints keep their Hub name. The `"model"` field of an answer carries
-the name of the model that answered, so `english`, `multilingual`,
-`typed-decisions` or a thinker's name, where the Python package printed
-its own.
-
 ## Getting the checkpoints
 
-The weights are not in this repo, and not in the Python package's GitHub
-repo either. They live on the Hugging Face Hub at
-**https://huggingface.co/convaiinnovations/laya**, one repo bundling three
-checkpoints:
+The weights are not in this repo, and need to be downloaded from the [Laya Hugging Face repo](https://huggingface.co/convaiinnovations/laya). The three
+checkpoints are:
 
 | name | where in the repo | encoder | context | for |
 |---|---|---|---|---|
@@ -71,7 +56,7 @@ checkpoints:
 | `multilingual` | `multilingual/` | mmBERT-base, 322M | 1024 | 100+ languages (Gemma sentencepiece tokenizer, 256k vocab) |
 
 `jolt prepare` reads five files per checkpoint from a directory laid out
-like the repo. The root is english, and the subfolders are optional.
+the same way as the repo. The root is english, and the subfolders are optional.
 
 ```
 ../laya/
@@ -84,10 +69,10 @@ like the repo. The root is english, and the subfolders are optional.
   multilingual/              # same five files, optional (~640 MB)
 ```
 
-Fetch them with nothing but curl. Trim the first loop to the checkpoints
+Trim the first loop to the checkpoints
 you want, where the `""` entry is english:
 
-```
+```bash
 for sub in "" typed-decisions/ multilingual/; do
   mkdir -p ../laya/${sub}tokenizer ../laya/${sub}encoder
   for f in model.safetensors tokenizer/tokenizer.json tokenizer/tokenizer_config.json encoder/config.json rl_agent_config.json; do
@@ -107,8 +92,8 @@ Put it anywhere and point `LEV_CHECKPOINTS` at it, or run
 `jolt -M:prepare --checkpoints DIR --out data`. `jolt prepare` converts
 every checkpoint it finds into the same layout under the data root, so
 `data/`, `data/typed-decisions`, `data/multilingual`. Add `--model NAME`
-to convert one. A root missing any of the five files is refused, with a
-message that says so.
+to convert one. A root missing any of the five files is refused, with an
+error message.
 
 ### A thinker's model
 
@@ -140,20 +125,6 @@ jolt -M:calibrate --labels cases.jsonl --out calibration.edn   # refit an encode
 jolt binary              # standalone ./lev-server (kernels + llama.cpp linked in), self-tested against golden/
 ```
 
-jolt 0.8.10 or newer is required, pinned by `deps.edn :jolt/min-version`.
-An older runtime refuses the tree, and CI always installs the latest
-release. `jolt kernels` shells out to `cc`. `jolt llama` shells out to
-`git`, `cmake` and `cc`, and is optional. Without its library the encoders
-run and only the thinker is missing. `jolt prepare` needs just the
-checkpoints and the kernel library, and finishes in a few seconds per
-checkpoint.
-
-No Python is involved in the engine. The two `bench/*.py` scripts that
-fetch public datasets are the exception. `golden/` holds the traces dumped
-from the torch CPU oracle, english at the root with
-`golden/typed-decisions/` and `golden/multilingual/` for the others, and
-is checked in.
-
 `jolt -M:test` runs everything against whatever is prepared under `data/`.
 Use `jolt -M:test lev.checkpoints-test` for one namespace.
 `LEV_TEST_CHECKPOINTS=typed-decisions` restricts the extra-checkpoint
@@ -163,11 +134,10 @@ is how CI tests one checkpoint per process.
 `jolt -M:run demo` prints the quickstart answer JSON. The `:system-one`
 value should match `golden/readme.edn` to the fourth decimal, see Status.
 
-Answers come back as ordered maps with string keys, in the shape of the
-Python dicts. Option order and question order are part of the model input,
+Answers come back as ordered maps with string keys.
+Option order and question order are part of the model input,
 so pass `:criteria` and the questions map as ordered maps, either an
-`array-map` or a literal with at most 8 entries. A hash-map would reorder
-them.
+`array-map` or a literal with at most 8 entries to ensure ordering.
 
 ```clojure
 (require '[lev.agent :as ag] '[lev.workflows :as wf])
@@ -179,6 +149,7 @@ them.
 ```
 
 ## Configuration: `~/.config/lev`
+
 Every entry point, whether `jolt prepare`, `jolt -M:run`, `jolt -M:serve`,
 `jolt -M:calibrate`, the bench runners or the binary, resolves its
 settings the same way. CLI flag beats environment variable, environment
@@ -224,7 +195,7 @@ or an unbuilt llm native, is a 503. `GET /v1/models` says which is which.
 | goldens (`--self-test`) | `--golden DIR` | `LEV_GOLDEN` | `:golden` | `golden` |
 
 `--workflows` and `LEV_WORKFLOWS` are the exception to "adds". They name
-exactly the directories to scan, replacing the defaults, so a test or a
+ the directories to scan, replacing the defaults, so a test or a
 one-off run stays isolated from whatever is in `~/.config/lev`.
 
 ### Calibration
@@ -242,8 +213,8 @@ over the checkpoint's own. `--calibration FILE` and `LEV_CALIBRATION` do
 the same for every encoder.
 
 A refit changes no answer. Temperature scaling keeps every argmax, so
-only what `probabilities` and `confidence` mean moves, which is what the
-gate reads. Labeled cases are JSON lines:
+only what `probabilities` and `confidence` mean which the gate reads moves.
+Labeled cases are JSON lines:
 
 ```json
 {"state": "...", "questions": {"q": {"type": "noul", "instructions": "..."}}, "labels": {"q": true}}
@@ -281,8 +252,8 @@ a 503.
 ## Context: what the model sees
 
 The encoders have no sessions, turns or memory. Every call is one
-stateless forward pass, and the context is exactly the `state` you pass.
-The server caches loaded weights, nothing else. For each question,
+stateless forward pass, and the context is the `state` you pass in.
+The server only caches loaded weights. For each question,
 `build-sequence` lays out
 
 ```
@@ -291,8 +262,8 @@ The server caches loaded weights, nothing else. For each question,
 
 and the encoder reads it bidirectionally in one pass. The head scores the
 `[MASK]` marker of each option. The questions in a call share the state
-but run as independent rows. Nothing passes between them, and nothing
-survives the call.
+but run as independent rows with nothing passing between them, or
+surviving the call.
 
 **Budget.** `max_len` is 512 tokens on `english`, and 1024 on
 `typed-decisions` and `multilingual`, as trained. Instructions and
@@ -324,7 +295,7 @@ deliberately, and check on your own data. Lowering `head_max_len` buys
 state room at the cost of shrinking long option texts sooner.
 
 **Shaping the state.** A string is tokenized as is. A map or vector is
-serialized like Python's `json.dumps`, with key order kept and
+serialized with key order kept and
 `ensure_ascii` off, and the keys are tokens too. Name them, and refer to
 them in the instructions with backticks, the way the presets do:
 
@@ -364,7 +335,7 @@ answer is the act head's estimate that the system should act rather than
 escalate, which is the natural input to gating between calls. A
 server-side session store that appends a turn and re-runs a workflow on
 the trajectory would be an application-layer feature, one the upstream
-package does not have either. The workflow contract is where it would go.
+package does not have either. It would go in the workflow contract.
 
 ## Workflows
 
@@ -425,7 +396,7 @@ jolt -M:run ask @request.json     # {"state": ..., "questions": {...}, "constrai
 
 The model answers each question on its own. A workflow or a request can
 tie them together with constraints, decided jointly after the forward
-pass. The implementation is `lev.constraints`, a port of GLiNER2's
+pass. The implementation is `lev.constraints`, a port of
 constrained classification:
 
 ```clojure
@@ -444,7 +415,7 @@ and `exactly k`, over refs or nested constraints. Score questions add
 strings, keywords, dashes or underscores. JSON requests use the same
 shape.
 
-The decision maximises the joint probability, the sum of the calibrated
+The decision maximizes the joint probability, the sum of the calibrated
 log probabilities, subject to the constraints. Questions that nothing
 couples stay independent. Coupled ones go through exact search with
 branch and bound, which falls back to beam search past a node budget.
@@ -460,9 +431,7 @@ constraints, listed in `violations`. Set `on_infeasible` to `raise` to
 fail instead. The bundled `email` workflow ties `needs_reply` to
 `is_spam` and `is_phishing`.
 
-Bundled are five with questions byte-identical to the Python package's
-presets, pinned by `golden/presets.edn`, where `email` adds constraints
-the Python package has no equivalent of. `security` comes from von:
+Bundled are five with questions pinned by `golden/presets.edn`:
 
 | workflow | input | asks |
 |---|---|---|
@@ -471,14 +440,13 @@ the Python package has no equivalent of. `security` comes from von:
 | `triage` | `{"message"}` or a string | intent, urgency, frustration, refund requested, churn risk |
 | `guard` | `{"prompt"}` or a string | jailbreak, prompt injection, sensitive data, harm severity, topic |
 | `moderation` | `{"post"}` or a string | toxic, harassment, threat, spam, severity |
-| `llm-router` | `{"request"}` or a string | difficulty, domain, needs tools, is sensitive (routing *your* LLM traffic, `lev.router` picks lev models) |
+| `llm-router` | `{"request"}` or a string | difficulty, domain, needs tools, is sensitive (routing *your* LLM traffic, `lev.router` picks Lev models) |
 | `security` | `{"event"}` or a string | event type, active threat, severity (von's security preset), with constraints: benign is no threat, a threat is at least elevated |
 
 ## HTTP API
 
 `lev.server` mirrors the [TypeSafe Jev API](https://docs.typesafe.ai/api)
-and adds the Python package's `Router` and presets. Routes are dispatched
-by [ruuter](https://github.com/askonomm/ruuter).
+and adds `Router` along with presets.
 
 ```
 POST /v1/systemone        Authorization: Bearer <key>   (only if a key is configured)
@@ -501,8 +469,7 @@ GET  /v1/workflows        -> {"workflows": {"email": {"description", "file", "qu
 GET  /health              -> {"status": "ok", "model": "lev", "loaded": [...], "thinkers": [...], "workflows": [...]}
 ```
 
-Questions and answers keep the shapes the Python `Agent.system_one` uses,
-so choice, score and noul, plus the `action.act_probability` extension on
+Questions and answers score and noul, plus the `action.act_probability` extension on
 the encoders' answers. A thinker answers in the same shapes without
 `action`, adds a `"thinking": {"enabled", "tokens", "max_tokens"}`
 report, and on request, with `"thought": true`, each answer's reasoning
@@ -583,13 +550,13 @@ for the native library and `data/`, then:
 ```clojure
 (require '[lev.agent :as ag] '[lev.server :as server] '[lev.config :as cfg])
 (def agent (ag/load-agent (cfg/setting (cfg/context {}) "--data" "LEV_DATA" :data "data")))
-(ag/system-one agent state questions)                  ; the Python API, as data (~1.7 GB f32, loaded once)
+(ag/system-one agent state questions)                  
 (def h (server/handler agent {:api-key nil}))          ; a ring handler to mount anywhere
 (def s (server/start agent {:port 8080}))              ; or run it on ring-chez-adapter
 (server/stop s)
 ```
 
-Or route between the checkpoints like the Python `Router`, loading each
+Or route between the checkpoints, loading each
 on first use and keeping `:max-loaded` resident:
 
 ```clojure
@@ -633,10 +600,7 @@ mac, linked in. It then runs `./lev-server --self-test` against
 question, which proves the link.
 
 Why the self-test? The suite runs interpreted, and a compiler release
-can build the tree wrong where the interpreter runs it right. jolt 0.8.9
-miscompiled a `reduce` whose accumulator starts as `nil` and is tested
-with `nil?`, which is the pattern `lev.tokenizer/lowest-ranked-pair`
-uses. 0.8.10 fixed it. So the binary proves itself before it ships.
+can build the tree wrong where the interpreter runs it right.
 
 The binary still needs the prepared data root next to it, or `--data
 DIR`, or `config.edn`. It loads the workflow files from source at
@@ -652,13 +616,10 @@ libssl and libcrypto for the adapter.
 
 Tagged releases, the `v*` tags, carry this binary prebuilt for macOS
 arm64, with `golden/` and `workflows/` alongside, built and self-tested
-by `.github/workflows/release.yml`. Linux x86_64 comes once
-jolt-lang/jolt#1060 lands. `jolt build`'s static relink fails on
-Ubuntu's PIE default, so v0.1.0 shipped the mac binary only. CI runs the
-suite on both platforms on every push, fetching the three checkpoints
-from the Hub at the revision `golden/` was dumped from.
+by `.github/workflows/release.yml`.
 
 ## Speed or accuracy
+
 `bench/` runs any configured model on von's authored144 set, 144
 adversarial three-way decisions:
 
@@ -671,10 +632,9 @@ jolt -M bench/authored144.clj --debias                            # english with
 jolt -M bench/triad.clj english                                   # AG News / BoolQ / SST-5, with ECE and what a gate keeps
 ```
 
-A hosted generative decision API wins through its reasoning budget. Take
-the thinking away and the same 2.5B model answering at once is no better
-than an NLI encoder, at von-1.0's 76%. So pick per request: `model` names
-the encoder or the thinker, `thinking` sets the budget, and `escalate`
+A hosted generative decision API wins through its reasoning budget. A
+generative model answering without thinking does no better
+than an NLI encoder, `thinking` sets the budget, and `escalate`
 gates it so only the unsure answers pay for it. Numbers, alternatives
 and the method are in [bench/README.md](bench/README.md).
 
@@ -703,10 +663,7 @@ entries, and the build task branches on OS.
 - **ICU**: `libicucore.dylib` on mac, whose system dylib leaves the
   symbols unguarded, and `libicuuc.so.<ver>` on linux. The tokenizers
   call `unorm2` for NFC and the `u_charType` / `u_isUWhiteSpace`
-  classifiers. Language detection and the email workflow use the same
-  classifiers for Python's `str.isalpha`, `\\w` and `\\s`. Linux ICU
-  builds append the major version to every symbol, like `u_charType_76`,
-  and the bindings resolve the first spelling that exists, for versions
+  classifiers. Linux ICU builds append the major version to every symbol, like `u_charType_76`, and the bindings resolve the first spelling that exists, for versions
   60 to 90.
 - **JSON**: `org.clojure/data.json` from Maven, plus `jolt-lang/time`,
   which provides the `java.time` classes data.json needs to load. Only
@@ -726,13 +683,7 @@ not listed.
 Encoder, head, both tokenizers, sequence, agent, the workflows and the
 checkpoint conversion all match their golden traces on all three
 checkpoints, in `golden/`, `golden/typed-decisions/` and
-`golden/multilingual/`. The `system-one` output on the quickstart case
-matches the Python output on each of them to the four decimals it prints.
-One value, `urgency` p[1] at 0.314250x, sits on a rounding boundary and
-prints 0.3142 or 0.3143 depending on the BLAS and how attention is
-blocked, so exact bytes are not the contract. Language detection, the
-Router's decisions and the presets match the Python package on every
-pinned case.
+`golden/multilingual/`.
 
 Per-forward temporaries live in an ffi arena that closes with the call,
 so a long-running process stays at the size of the loaded weights. That
@@ -761,11 +712,3 @@ never a result. Every task runs the same arithmetic, and the suite
 checks that the bytes are identical at 1, 2, 3 and 8 threads. On one
 thread the same call takes around 520 ms at 512 tokens, and `email`
 around 2.3 s.
-
-Two known sources of last-digit drift exist, both one unit in the fourth
-decimal of a probability sitting on a rounding boundary. Python computes
-the calibrated softmax in float32 through numpy, while the port uses
-doubles. And sgemm summation order differs between BLAS libraries, and
-between the CPU models OpenBLAS picks its kernels for. The same weights
-gave 0.3142 on one Linux CI machine and 0.3143 on another. The suite
-asserts the one-unit bound everywhere.
