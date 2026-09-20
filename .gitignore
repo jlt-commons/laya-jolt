@@ -4,6 +4,7 @@ __pycache__/
 *.dylib
 *.so
 *.o
+.beads/
 .nrepl-port
 .dirge/
 target/

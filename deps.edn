@@ -9,9 +9,11 @@
  ;; data.json reads tokenizer.json / the configs / the safetensors header in
  ;; `jolt prepare`. It needs java.time at load, which jolt-lang/time provides.
  ;; ring-chez-adapter serves lev.server (jolt -M:serve / the built binary);
- ;; ruuter (a 150-line data-driven router) dispatches its routes.
+ ;; ruuter (a data-driven trie router) dispatches its routes.
  :deps {org.clojure/data.json {:mvn/version "2.5.1"}
-        org.clojars.askonomm/ruuter {:mvn/version "1.3.5"}
+        askonomm/ruuter {:git/url "https://git.nmm.ee/asko/ruuter.git"
+                        :git/tag "v2.1.1"
+                        :git/sha "263f868cf19e73ccda7cda6b4d4af1d8fe504749"}
         io.github.jolt-lang/time {:git/url "https://github.com/jolt-lang/time.git"
                                   :git/sha "abeee49974c2c4efa2fa75c96d9a379822c6815f"}
         jolt-lang/ring-chez-adapter {:git/url "https://github.com/jolt-lang/ring-chez-adapter"
