@@ -108,7 +108,10 @@
                     "-DLLAMA_BUILD_TESTS=OFF" "-DLLAMA_BUILD_EXAMPLES=OFF" "-DLLAMA_BUILD_TOOLS=OFF"
                     "-DLLAMA_BUILD_SERVER=OFF" "-DLLAMA_CURL=OFF"
                     (if mac? ["-DGGML_METAL=ON" "-DGGML_METAL_EMBED_LIBRARY=ON" "-DGGML_BLAS=OFF"] ["-DGGML_METAL=OFF"]))
-             (shell "cmake" "--build" (str dir "/build") "--target" "llama" "-j"))
+             ;; a bare -j is unbounded: every model source at once, which a
+             ;; 4-core/7 GB CI runner answers with an OOM kill (exit 143)
+             (shell "cmake" "--build" (str dir "/build") "--target" "llama"
+                    "--parallel" (str (.availableProcessors (Runtime/getRuntime)))))
            (if (and (fs/exists? lib) (fs/exists? "native/liblev_llm.a")
                     (empty? (fs/modified-since lib ["native/lev_llm.c" "native/build_llm.sh"])))
              (println "llm: up to date -" lib "native/liblev_llm.a")
