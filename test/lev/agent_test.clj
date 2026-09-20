@@ -270,7 +270,9 @@
     (is (< (Math/abs (- 1.0 (reduce + (vals (get-in a ["department" "probabilities"]))))) 2e-4))
     (is (not= (get-in plain ["answers" "department" "probabilities"]) (get-in a ["department" "probabilities"])))
     (is (= "billing" (get-in a ["department" "choice"])))
-    (is (= (get-in plain ["answers" "urgency"]) (get a "urgency")) "a score is untouched")
-    (is (= (get-in plain ["answers" "churn_risk"]) (get a "churn_risk")) "a noul is untouched")
+    ;; the other questions ride in a bigger batch, which under OpenBLAS can
+    ;; move a value on a rounding boundary by one unit in the fourth decimal
+    (is (tu/approx= 1.0001e-4 (get-in plain ["answers" "urgency"]) (get a "urgency")) "a score is untouched")
+    (is (tu/approx= 1.0001e-4 (get-in plain ["answers" "churn_risk"]) (get a "churn_risk")) "a noul is untouched")
     (testing "usage counts every sequence that ran"
       (is (> (get-in out ["usage" "input_tokens"]) (get-in plain ["usage" "input_tokens"]))))))

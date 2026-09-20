@@ -215,6 +215,7 @@
             "the default is english (an encoder): no fallback for a Hindi state")))))
 
 (deftest a-calibration-file-is-applied-when-the-encoder-loads
+  (clojure.java.io/make-parents "target/router-cal.edn")
   (spit "target/router-cal.edn" (pr-str {:temperature-by-options {"noul:2" 0.25}}))
   (let [seen (atom nil)
         r (router/make-router {:models {"english" tu/data-dir}
