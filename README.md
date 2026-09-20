@@ -631,6 +631,7 @@ jolt -M bench/authored144.clj --model minicpm5                   # 95%, seconds 
 jolt -M bench/authored144.clj --debias                            # english with option-rotation averaging: 64%
 jolt -M bench/triad.clj english                                   # AG News / BoolQ / SST-5, with ECE and what a gate keeps
 jolt -M bench/workflow.clj                                        # a 4-question call on a short and a long state, p50 / p95
+jolt -M bench/paired.clj --candidates cpu,mlx                     # two agents interleaved on the same inputs: paired speedup with a 95% interval
 ```
 
 A call tokenizes its state once for all its questions, and keeps every

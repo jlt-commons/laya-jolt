@@ -193,3 +193,27 @@ tokenizations were redundant. The short-state case saves ~5 ms of a 300
 ms call, under the run-to-run drift of the same code (288 vs 304 ms), so
 no claim there. The tokenizer itself runs at ~33 µs a token, slow in
 absolute terms (laya-jolt-edf); this removes the repetition, not the rate.
+
+## Measuring a change: `bench/paired.clj`
+
+A sequential before/after (two processes, one after the other) confounds
+the change with the machine's drift: above, the same code moved 288 →
+304 ms between two runs, and laya-mlx's sequential pilot put `mx.compile`
+at 1.24x where its interleaved run found 1.03x. `bench/paired.clj` is
+that interleaved run, ported: every round takes one input (rotating over
+8 state variants) and times every candidate on it in an order that
+rotates by one each round; the report is the median of the per-round
+`baseline / candidate` ratios with a percentile-bootstrap 95% interval
+(2,000 resamples), next to the p50s. An interval that includes 1 is no
+win. `cpu,cpu` is the noise floor, the same agent against itself:
+
+```
+jolt -M bench/paired.clj --candidates cpu,cpu --rounds 20
+  short4 (4 questions)   cpu/cpu#2  paired speedup 1.000x  [0.998, 1.007]   per-round 0.989..1.207
+  long4  (4 questions)   cpu/cpu#2  paired speedup 0.990x  [0.979, 1.016]   per-round 0.917..1.175
+  long1  (1 question)    cpu/cpu#2  paired speedup 1.007x  [0.997, 1.021]   per-round 0.862..1.125
+```
+
+Single rounds swing by 20%; twenty paired rounds pin the ratio to ±2%.
+Anything that changes the forward (a backend, a pruned layer) is measured
+here before it lands.
