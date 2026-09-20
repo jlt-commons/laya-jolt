@@ -14,8 +14,8 @@ kinds of model behind the same API:
   binary. It reads the state and the question, thinks, and its candidate
   answers are scored by their token log probabilities. Seconds a
   question, and right where the encoders are not: on the adversarial
-  authored144 set (`bench/`) MiniCPM5-2B answers 97% with thinking
-  against the encoders' 61–76%.
+  authored144 set (`bench/`) MiniCPM5-2B answers 95% with thinking
+  against the encoders' 61–67%.
 
 A request names the model (`"model": "english"` or `"minicpm5"`) or is
 routed by content to an encoder; a confidence gate can answer on the
@@ -131,11 +131,13 @@ jolt binary              # standalone ./lev-server (kernels + llama.cpp linked i
 jolt 0.8.10 or newer (`deps.edn :jolt/min-version`; an older runtime
 refuses the tree, and CI always installs the latest release). `jolt kernels`
 shells out to `cc`; `jolt llama` to `git`, `cmake` and `cc`, and is optional:
-without its library the encoders run and only the thinker is missing. `jolt prepare` needs only the checkpoints
-and the kernel library; it runs in a few seconds per checkpoint. No Python
-is involved anywhere; `golden/` holds the traces dumped from the torch CPU
-oracle (english at the root, `golden/typed-decisions/` and
-`golden/multilingual/` for the others) and is checked in.
+without its library the encoders run and only the thinker is missing.
+`jolt prepare` needs only the checkpoints and the kernel library; it runs
+in a few seconds per checkpoint. No Python is involved in the engine
+(the two `bench/*.py` scripts that fetch public datasets are the
+exception); `golden/` holds the traces dumped from the torch CPU oracle
+(english at the root, `golden/typed-decisions/` and `golden/multilingual/`
+for the others) and is checked in.
 
 `jolt -M:test` runs everything against whatever is prepared under `data/`;
 `jolt -M:test lev.checkpoints-test` runs one namespace, and
@@ -161,8 +163,9 @@ or a literal with at most 8 entries); a hash-map would reorder them.
 
 ## Configuration: `~/.config/lev`
 
-Every entry point (`jolt prepare`, `jolt -M:run`, `jolt -M:serve`, the
-binary) resolves its settings the same way: **CLI flag > environment
+Every entry point (`jolt prepare`, `jolt -M:run`, `jolt -M:serve`,
+`jolt -M:calibrate`, the bench runners, the binary) resolves its settings
+the same way: **CLI flag > environment
 variable > `config.edn` > default**. `config.edn` lives in
 `$LEV_CONFIG_DIR`, else `$XDG_CONFIG_HOME/lev`, else `~/.config/lev`:
 
@@ -170,6 +173,7 @@ variable > `config.edn` > default**. `config.edn` lives in
 {:data "/Users/me/models/lev-data"       ; prepared data root: what jolt prepare writes and everything else loads
  :checkpoints-home "/Users/me/models/laya"  ; the Hub checkpoints jolt prepare reads
  :encoders {"english" "/Users/me/models/lev-data"}   ; prepared encoders by name (else the :data layout); leave one out to not serve it
+ :calibration {"english" "/Users/me/models/calibration-english.edn"}   ; refit temperatures per encoder (see Calibration)
  :thinkers {"minicpm5" {:model "/Users/me/models/MiniCPM5-2B-Q8_0.gguf"}}   ; generative models (see Thinkers); none = encoders only
  :workflow-dirs ["/Users/me/src/decisions/workflows"]   ; extra workflow directories
  :port 8080 :host "127.0.0.1" :api-key "s3cret"        ; server defaults
@@ -192,6 +196,7 @@ not built) is a 503, and `GET /v1/models` says which is which.
 | prepared data root | `--data DIR` | `LEV_DATA` | `:data` | `data` |
 | checkpoints (prepare) | `--checkpoints DIR` | `LEV_CHECKPOINTS` | `:checkpoints-home` | `../laya` |
 | encoders served | — | — | `:encoders {"name" dir}` | the `:data` layout |
+| calibration | `--calibration FILE` (every encoder) | `LEV_CALIBRATION` | `:calibration {"name" file}` | the checkpoint's own temperatures |
 | thinkers served | `--thinker PATH.gguf` (as `thinker`) | `LEV_THINKER` | `:thinkers {"name" {...}}` | none |
 | workflow dirs | `--workflows DIR[:DIR]` | `LEV_WORKFLOWS` | `:workflow-dirs` (adds) | see below |
 | server | `--port` `--host` `--api-key` | `PORT` `LEV_HOST` `LEV_API_KEY` | `:port` `:host` `:api-key` | `8080` `127.0.0.1` none |
@@ -235,11 +240,14 @@ ECE from 0.16 to 0.11 (`bench/README.md`).
 ```clojure
 {:thinkers {"minicpm5" {:model "/Users/me/models/MiniCPM5-2B-Q8_0.gguf"
                         :thinking true          ; think before answering (a request can override)
-                        :max-think-tokens 1024  ; the budget; the thought is closed when it runs out
+                        :max-think-tokens 2048  ; the budget; the thought is closed when it runs out
                         :n-ctx 4096 :n-gpu-layers -1 :threads 0   ; llama.cpp: context, layers on the GPU (-1 all), threads (0 = its default)
-                        :temperature 1.0 :top-p 0.95 :min-p 0.0 :seed 42}}   ; sampling of the thought
+                        :temperature 0.0 :top-p 0.95 :min-p 0.0 :seed 42}}   ; the thought: greedy by default (95% vs 91% sampled on authored144)
  :max-thinkers 1}                                ; resident at once (each is GBs)
 ```
+
+These are the defaults (`lev.think/defaults`), so `{:model path}` alone
+is a complete entry.
 
 Each entry is a model name a request can ask for. `--thinker PATH` or
 `LEV_THINKER` adds one named `thinker`. Thinkers are loaded on first use,
@@ -268,11 +276,12 @@ and `multilingual`, as trained. Instructions and options get up to
 instructions), the state gets the rest. Measured on the bundled workflows:
 427–478 state tokens per question on `english` (roughly 1,700–1,900
 characters of English prose, less for JSON), 940–990 on the other two. What
-does not fit is dropped from the **end**, silently: the first tokens of the
-serialized state are kept. That is why the `email` workflow strips quoted
-history, signatures and disclaimers and caps the body at 3,000 characters
-before the model sees anything. `usage.input_tokens` in every answer is the
-total over all questions, so it tells you when a state is being cut.
+does not fit is dropped from the **end**: the first tokens of the
+serialized state are kept, and the answer says so under `"truncated"`
+(`{qid: tokens dropped}`, present only when something was cut). That is
+why the `email` workflow strips quoted history, signatures and disclaimers
+and caps the body at 3,000 characters before the model sees anything.
+`usage.input_tokens` in every answer is the total over all questions.
 
 Both limits are yours to change: `:max-len` / `:head-max-len` in
 `config.edn` (for every checkpoint, or per name under `:checkpoints`),
@@ -439,8 +448,9 @@ and adds the Python package's `Router` and presets. Routes are dispatched by
 ```
 POST /v1/systemone        Authorization: Bearer <key>   (only if a key is configured)
 {"state": <string|object|array>, "questions": {"<id>": {...}}, "constraints"?: [...], "on_infeasible"?: "min_violations"|"raise",
- "model"?: ..., "lang"?: ..., "task"?: ...}
+ "model"?: ..., "lang"?: ..., "task"?: ..., "thinking"?: bool, "thought"?: bool, "debias"?: bool, "escalate"?: {...}}
 -> {"model": "english", "answers": {"<id>": {...}}, "usage": {"input_tokens": n, "output_tokens": 0},
+    "truncated"?: {"<id>": tokens}, "debias"?: {"<id>": rotations},
     "constraints"?: {"feasible": bool, "decoder": ..., "exact": bool, "violations": [...]},
     "routing": {"model": "english", "repo": "convaiinnovations/laya", "reason": "English Latin text",
                 "detection": {...}, "workflow": null}}
@@ -450,7 +460,8 @@ POST /v1/workflows/<name> {"input": <anything the workflow's state fn takes>, "o
                            "on_infeasible"?: ..., "model"?/"lang"?/"task"?}
                           -> the systemone answer + "workflow" + the built "state"; the request's constraints
                              are added to the workflow's own
-GET  /v1/models           -> {"default": ..., "max_loaded": n, "models": {"english": {"repo", "data", "available", "loaded"}, ...}}
+GET  /v1/models           -> {"default": ..., "max_loaded": n, "thinkers": {"minicpm5": {"model", "available", "loaded", "thinking"}},
+                              "models": {"english": {"repo", "data", "available", "loaded", "limits"}, ...}}
 GET  /v1/workflows        -> {"workflows": {"email": {"description", "file", "questions": [ids], "constraints": [...], "options": bool}, ...}}
 GET  /health              -> {"status": "ok", "model": "lev", "loaded": [...], "thinkers": [...], "workflows": [...]}
 ```
@@ -461,7 +472,7 @@ encoders' answers). A thinker answers in the same shapes without `action`,
 with a `"thinking": {"enabled", "tokens", "max_tokens"}` report and, on
 request (`"thought": true`), each answer's reasoning under `"thought"`;
 `"thinking": false` asks it to answer at once (~150 ms on a GPU, 74% on
-authored144 against 97% with thinking).
+authored144 against 95% with thinking).
 
 ```
 POST /v1/systemone {"state": ..., "questions": {...}, "model": "minicpm5", "thinking": true, "thought": false}
@@ -499,9 +510,10 @@ head, a constraint that names no question or label — at
 `["body", "constraints", i]` — or, with `on_infeasible: raise`, a set
 nothing satisfies: type `infeasible`, with the `violations`), `404` for
 unknown routes and workflows, `405` for the wrong method,
-`503` when the chosen checkpoint has no prepared data, `413` past
-`:max-request-bytes` (4 MiB). Inference and checkpoint loading are
-serialized on one lock; the adapter's workers overlap only on I/O.
+`503` when the chosen model is not available (an encoder with no prepared
+data, a thinker with no GGUF or no llm native), `413` past
+`:max-request-bytes` (4 MiB). Inference and model loading are serialized
+on one lock; the adapter's workers overlap only on I/O.
 
 ```
 jolt -M:serve --port 8080 --host 0.0.0.0 --api-key s3cret   # or PORT / LEV_HOST / LEV_API_KEY / LEV_DATA, or config.edn
@@ -514,11 +526,12 @@ curl -s -H 'Authorization: Bearer s3cret' -d '{"input": {"subject": "Refund", "b
 ```
 
 The server holds one data root (`--data`, the layout `jolt prepare`
-writes: `DIR/` english, `DIR/multilingual`, `DIR/typed-decisions`), loads
-the default checkpoint at startup and the others on first use, keeping
-`--max-loaded` (default 1) resident with least-recently-used eviction: all
-three together are ~4.6 GB of f32. A request routed to a checkpoint that
-was never prepared gets a `503` saying so.
+writes: `DIR/` english, `DIR/multilingual`, `DIR/typed-decisions`) and the
+configured thinkers, loads the default model at startup and the others on
+first use, keeping `--max-loaded` encoders (default 1; all three together
+are ~4.6 GB of f32) and `--max-thinkers` thinkers resident with
+least-recently-used eviction. A request for a model that is not available
+gets a `503` saying so.
 
 ### As a library
 
@@ -591,8 +604,10 @@ libssl/libcrypto for the adapter.
 ./lev-server --self-test --data data --golden golden
 ```
 
-Tagged releases (`v*`) carry this binary prebuilt for macOS arm64 and Linux
-x86_64, with `golden/` and `workflows/` alongside, built and self-tested by
+Tagged releases (`v*`) carry this binary prebuilt for macOS arm64 (and
+Linux x86_64 once jolt-lang/jolt#1060 lands: `jolt build`'s static relink
+fails on Ubuntu's PIE default, so v0.1.0 shipped the mac binary only),
+with `golden/` and `workflows/` alongside, built and self-tested by
 `.github/workflows/release.yml`. CI runs the suite on both platforms on every
 push, fetching the three checkpoints from the Hub at the revision `golden/`
 was dumped from (`.github/actions/setup`).
@@ -606,7 +621,9 @@ adversarial three-way decisions):
 jolt -M bench/authored144.clj                                   # english: 61%, ~120 ms a case
 jolt -M bench/authored144.clj --model typed-decisions            # 67%
 jolt -M bench/authored144.clj --model minicpm5 --thinking false  # 74%, ~150 ms a case (Metal)
-jolt -M bench/authored144.clj --model minicpm5                   # 97%, seconds a case
+jolt -M bench/authored144.clj --model minicpm5                   # 95%, seconds a case
+jolt -M bench/authored144.clj --debias                            # english with option-rotation averaging: 64%
+jolt -M bench/triad.clj english                                   # AG News / BoolQ / SST-5, with ECE and what a gate keeps
 ```
 
 The gap to a hosted generative decision API is the reasoning budget, not
