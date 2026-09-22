@@ -9,6 +9,10 @@
 
     jolt -M bench/workflow.clj [--data DIR] [--model NAME] [--iterations N] [--warmup N]
 
+  --model may name a thinker (config.edn :thinkers, LEV_THINKER): then
+  the calls go through lev.think, with thinking off unless the thinker's
+  config turns it on, and the state tokenization lines are left out.
+
   No answers change under either optimization (golden/ pins them); this
   measures the time they take."
   (:require [lev.agent :as ag]
@@ -41,14 +45,16 @@
         warmup (Long/parseLong (get opts "--warmup" "3"))
         rt (router/make-router {:data data
                                 :checkpoints (into {} (map (fn [n] [n (cfg/limits ctx n)])) router/names)
-                                :calibrations (cfg/calibrations ctx)})
+                                :calibrations (cfg/calibrations ctx)
+                                :thinkers (cfg/thinkers ctx)})
         agent (router/load-model rt model)
         tok (:tok agent)]
     (println (format "%s, %d questions a call, %d iterations after %d warmup" model (count wl/questions) iterations warmup))
-    (println (format "  short state: %d tokens; long state: %d tokens (max_len %d)"
-                     (count (seq/encode-state tok wl/short-state)) (count (seq/encode-state tok wl/long-state))
-                     (:max-len (:cfg agent))))
-    (row "tokenize the long state once" (timed #(seq/encode-state tok wl/long-state) iterations warmup))
+    (when tok
+      (println (format "  short state: %d tokens; long state: %d tokens (max_len %d)"
+                       (count (seq/encode-state tok wl/short-state)) (count (seq/encode-state tok wl/long-state))
+                       (:max-len (:cfg agent))))
+      (row "tokenize the long state once" (timed #(seq/encode-state tok wl/long-state) iterations warmup)))
     (row "4 questions, short state" (timed #(ag/system-one agent wl/short-state wl/questions) iterations warmup))
     (row "4 questions, long state" (timed #(ag/system-one agent wl/long-state wl/questions) iterations warmup))
     (row "1 question (department), long state" (timed #(ag/system-one agent wl/long-state (select-keys wl/questions ["department"])) iterations warmup))))

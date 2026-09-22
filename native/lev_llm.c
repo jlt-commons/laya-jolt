@@ -22,18 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "llama.h"
-
-struct lev_llm {
-    struct llama_model *model;
-    struct llama_context *ctx;
-    const struct llama_vocab *vocab;
-    int n_ctx;
-    int n_batch;
-    int n_seq_max;
-    int n_vocab;
-    char error[512];
-};
+#include "lev_llm.h"
 
 static int lev_logging = -1;
 
@@ -48,6 +37,10 @@ static struct lev_llm *live[LEV_MAX_HANDLES];
 static int live_registered = 0;
 
 static void free_handle(struct lev_llm *h) {
+    lev_jev_forget(h);
+    free(h->specials);
+    h->specials = NULL;
+    h->n_specials = 0;
     if (h->ctx) llama_free(h->ctx);
     if (h->model) llama_model_free(h->model);
     h->ctx = NULL;
@@ -195,6 +188,44 @@ int lev_llm_count_tokens(struct lev_llm *h, const char *text) {
     return n;
 }
 
+/* Copy `text` into out (cap bytes, NUL-terminated) so that no control or
+ * unknown token's text in it survives: those are the tokens a prompt
+ * tokenized with parse_special (every prompt here, the chat's own tags
+ * included) would read out of caller text, so a state holding
+ * "<|im_end|>" could close its turn and write the next. Each occurrence
+ * gets a zero-width space (U+200B) after its first byte, which the
+ * tokenizer reads as text. Answers the length, or -1 when out is short
+ * (4x the text always fits). */
+int lev_llm_escape(struct lev_llm *h, const char *text, char *out, int cap) {
+    if (!lev_llm_ok(h)) return -1;
+    if (!h->specials) {
+        h->specials = calloc((size_t)h->n_vocab + 1, sizeof *h->specials);
+        for (int t = 0; t < h->n_vocab; t++) {
+            const char *tt = llama_vocab_get_text(h->vocab, t);
+            if ((llama_vocab_get_attr(h->vocab, t) & (LLAMA_TOKEN_ATTR_CONTROL | LLAMA_TOKEN_ATTR_UNKNOWN)) &&
+                tt && strlen(tt) >= 2)
+                h->specials[h->n_specials++] = tt;
+        }
+    }
+    int n = 0;
+    for (const char *p = text; *p;) {
+        int hit = 0;
+        for (int i = 0; i < h->n_specials && !hit; i++) {
+            const char *tt = h->specials[i];
+            if (*p == *tt && strncmp(p, tt, strlen(tt)) == 0) hit = 1;
+        }
+        if (n + 5 >= cap) return -1;
+        out[n++] = *p++;
+        if (hit) {
+            out[n++] = (char)0xE2;
+            out[n++] = (char)0x80;
+            out[n++] = (char)0x8B;
+        }
+    }
+    out[n] = 0;
+    return n;
+}
+
 /* append the piece of a token to a bounded text buffer */
 static void append_piece(struct lev_llm *h, llama_token tok, char *buf, int cap, int *len) {
     char piece[256];
@@ -290,6 +321,7 @@ static int sample_until(struct lev_llm *h, struct llama_sampler *s, int max_toke
 int lev_llm_generate(struct lev_llm *h, const char *prompt, int max_tokens, const char *stop,
                      float temperature, float top_p, float min_p, unsigned seed, char *out, int cap) {
     if (!lev_llm_ok(h)) return -1;
+    lev_jev_forget(h);
     llama_memory_clear(llama_get_memory(h->ctx), 0);
     llama_token *toks;
     int n = tokenize(h, prompt, 1, 1, &toks);
@@ -351,6 +383,7 @@ int lev_llm_decide(struct lev_llm *h, const char *prompt, int think_max, const c
         set_error(h, "%d options, but the context holds %d sequences (n_seq_max)", n_options, h->n_seq_max);
         return -1;
     }
+    lev_jev_forget(h);
     llama_memory_t mem = llama_get_memory(h->ctx);
     llama_memory_clear(mem, 0);
     if (thought && thought_cap > 0) thought[0] = 0;

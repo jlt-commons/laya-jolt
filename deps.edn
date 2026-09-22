@@ -109,27 +109,37 @@
                (println "built:" kern-lib kern-archive)))}
 
   llama
-  {:doc "clone llama.cpp at the pinned tag into native/llama.cpp, build it static, wrap it in native/liblev_llm.* (the thinker's native; LLAMA_CPP_SRC=path clones from a local checkout)"
-   :task (let [tag "b10435"
-               src (or (System/getenv "LLAMA_CPP_SRC") "https://github.com/ggml-org/llama.cpp")
+  {:doc "fetch llama.cpp at the pinned commit of thecodacus/llama.cpp's parallel-decision branch (upstream b10435+617 plus its decision engine) into native/llama.cpp, build it static, wrap it and the engine in native/liblev_llm.* (the thinker's native; LLAMA_CPP_SRC=path fetches from a local checkout holding that commit)"
+   :task (let [rev "14d04e755fa28653e87b9a07072892265bdc0fad"
+               src (or (System/getenv "LLAMA_CPP_SRC") "https://github.com/thecodacus/llama.cpp")
                dir "native/llama.cpp"
+               head (str dir "/.git/HEAD")
                lib (str "native/liblev_llm." (if mac? "dylib" "so"))]
-           (when-not (fs/exists? (str dir "/CMakeLists.txt"))
-             (shell "git" "clone" "--quiet" "--depth" "1" "--branch" tag src dir))
-           (when-not (fs/exists? (str dir "/build/src/libllama.a"))
+           ;; a checkout of any other commit (the upstream tag this used to
+           ;; pin) is replaced, build and all
+           (when-not (and (fs/exists? head) (= rev (.trim (slurp head))))
+             (fs/delete-tree dir)
+             (fs/create-dirs dir)
+             (shell "git" "-C" dir "init" "--quiet")
+             (shell "git" "-C" dir "fetch" "--quiet" "--depth" "1" src rev)
+             (shell "git" "-C" dir "checkout" "--quiet" "FETCH_HEAD"))
+           (when-not (fs/exists? (str dir "/build/common/libllama-common.a"))
              (apply shell "cmake" "-S" dir "-B" (str dir "/build") "-DCMAKE_BUILD_TYPE=Release"
                     "-DBUILD_SHARED_LIBS=OFF" "-DGGML_OPENMP=OFF" "-DGGML_NATIVE=OFF" "-DGGML_CPU_ALL_VARIANTS=OFF"
                     "-DLLAMA_BUILD_TESTS=OFF" "-DLLAMA_BUILD_EXAMPLES=OFF" "-DLLAMA_BUILD_TOOLS=OFF"
-                    "-DLLAMA_BUILD_SERVER=OFF" "-DLLAMA_CURL=OFF"
+                    "-DLLAMA_BUILD_SERVER=OFF" "-DLLAMA_BUILD_APP=OFF" "-DLLAMA_CURL=OFF"
+                    ;; llama-common (the decision engine's tokenizer and batch
+                    ;; helpers) without the network: no https, no subprocess
+                    "-DLLAMA_BUILD_COMMON=ON" "-DLLAMA_OPENSSL=OFF" "-DLLAMA_SUBPROCESS=OFF"
                     (if mac? ["-DGGML_METAL=ON" "-DGGML_METAL_EMBED_LIBRARY=ON" "-DGGML_BLAS=OFF"] ["-DGGML_METAL=OFF"]))
              ;; a bare -j is unbounded: every model source at once, which a
              ;; 4-core/7 GB CI runner answers with an OOM kill (exit 143)
-             (shell "cmake" "--build" (str dir "/build") "--target" "llama"
+             (shell "cmake" "--build" (str dir "/build") "--target" "llama" "llama-common"
                     "--parallel" (str (.availableProcessors (Runtime/getRuntime)))))
            (if (and (fs/exists? lib) (fs/exists? "native/liblev_llm.a")
-                    (empty? (fs/modified-since lib ["native/lev_llm.c" "native/build_llm.sh"])))
+                    (empty? (fs/modified-since lib ["native/lev_llm.c" "native/lev_llm.h" "native/lev_decision.cpp" "native/build_llm.sh" head])))
              (println "llm: up to date -" lib "native/liblev_llm.a")
-             (shell "sh" "native/build_llm.sh")))}
+             (shell "sh" "native/build_llm.sh" rev)))}
 
   mlx
   {:doc "clone mlx-c at the pinned tag into native/mlx-c (it fetches mlx itself), build both static, wrap them in native/liblev_mlx.* with the Metal kernels beside it (the encoders' optional GPU backend, mac only; MLX_C_SRC=path clones from a local checkout)"

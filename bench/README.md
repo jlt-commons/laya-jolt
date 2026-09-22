@@ -194,6 +194,57 @@ ms call, under the run-to-run drift of the same code (288 vs 304 ms), so
 no claim there. The tokenizer itself runs at ~33 µs a token, slow in
 absolute terms (laya-jolt-edf); this removes the repetition, not the rate.
 
+## Jev mode: the thinker's questions in one pass (2026-09-22)
+
+`native/llama.cpp` is now thecodacus/llama.cpp's `parallel-decision`
+branch (upstream b10435 + 617 commits, plus
+`tools/parallel-decision/decision-engine.cpp`, linked into lev_llm by
+`native/lev_decision.cpp`). With thinking off, `lev.think` hands every
+question of a call to that engine (`lev.llm/jev`): the chat up to the
+state is decoded once and kept across calls, the state continues it, and
+each question is a branch sequence forked from the state (unified KV
+cache, `llama_memory_seq_cp`), all of them in one `llama_decode`. Each
+branch is the rest of that question's direct prompt through `ANSWER: `,
+and its option ids (closed by `<|im_end|>`) are scored at every node where
+their tokens diverge. So the prompts are byte for byte the ones the
+per-question path scores (`think-test` proves it), the questions cannot
+see each other there either, and what changes is the time and the
+scoring. MiniCPM5-2B Q8, Metal, same machine:
+
+| thinking off | authored144 | ECE | perturbations108 | trio (AG News / BoolQ / SST-5) | ms / case (authored144) |
+|---|---|---|---|---|---|
+| per-question path (`:jev false`), on the fork | 73.6% (106) | 0.193 | 60.2% (65) | 60.0% (72), ECE 0.281 | 139 |
+| **Jev mode**, the ids start their own token (`:split-boundary true`, the default) | **75.0% (108)** | **0.174** | 61.1% (66) | 60.0% (72), ECE 0.279 | **100** |
+| Jev mode, the engine's own cut (the id merged with the prefix's space) | 68.1% (98) | 0.226 | | | 100 |
+| Jev mode, kev's SemIf prompt (JSON payload, option letters), either cut | 65.3% (94) | | | | |
+
+Against the per-question path, Jev mode with lev's cut moves four cases
+(+3 -1) and a probability by 0.011 at the median: the same answers,
+normalised at the divergence nodes instead of over the whole vocabulary.
+The per-question path read 74.3% on llama.cpp b10435 and 73.6% on the
+fork: one case, the newer kernels. The engine's own cut, which tokenizes
+`ANSWER: supported` whole so the id is scored as ` supported` (the
+token the model would write), moves 38 cases the wrong way on balance
+(+15 -23); on this model the id after a decoded space is better, so lev
+passes the engine's `split_boundary`. kev's zero-shot SemIf prompt
+(which took an instruct Qwen from 0.726 to 0.812 on kev's transfer suite)
+loses ten points here: MiniCPM5 reads lev's prompt better.
+
+Where it pays is a call with several questions (`bench/workflow.clj
+--model <thinker>`, the four email questions, 20 iterations, p50):
+
+| call | per-question | Jev mode |
+|---|---|---|
+| 4 questions, short state | 539 ms | **207 ms** |
+| 4 questions, long state (1.6k-token email) | 4,317 ms | **1,177 ms** |
+| 1 question, long state | 1,096 ms | 1,076 ms |
+
+The per-question path decodes the whole prompt four times; Jev mode
+decodes the system turn once for the server's life, the state once a
+call, and the four questions' ~40-token tails together. One question on a
+long state is the state's prefill either way. Through `lev-server`, three
+questions on a short ticket answer in 170 ms warm.
+
 ## Measuring a change: `bench/paired.clj`
 
 A sequential before/after (two processes, one after the other) confounds

@@ -116,7 +116,7 @@ switch. Another model family needs its own template, which lives in
 
 ```
 jolt kernels             # compile native/lev_kernels.c
-jolt llama               # clone + build llama.cpp (pinned tag) into native/liblev_llm.*, the thinker's native
+jolt llama               # fetch + build llama.cpp (the parallel-decision fork, pinned commit) into native/liblev_llm.*, the thinker's native
 jolt mlx                 # mac: clone + build mlx-c (pinned tag) into native/liblev_mlx.*, the encoders' GPU backend
 jolt prepare             # every checkpoint under ../laya -> data/, data/typed-decisions, ...
 jolt -M:test             # parity suites vs golden/
@@ -238,7 +238,9 @@ numbers are in `bench/README.md`.
                         :thinking true          ; think before answering (a request can override)
                         :max-think-tokens 2048  ; the budget; the thought is closed when it runs out
                         :n-ctx 4096 :n-gpu-layers -1 :threads 0   ; llama.cpp: context, layers on the GPU (-1 all), threads (0 = its default)
-                        :temperature 0.0 :top-p 0.95 :min-p 0.0 :seed 42}}   ; the thought: greedy by default (95% vs 91% sampled on authored144)
+                        :temperature 0.0 :top-p 0.95 :min-p 0.0 :seed 42     ; the thought: greedy by default (95% vs 91% sampled on authored144)
+                        :jev true               ; thinking off: every question in one pass (Jev mode, below)
+                        :split-boundary true}}  ; Jev mode: option ids start their own token (75% vs 68% on authored144)
  :max-thinkers 1}                                ; resident at once (each is GBs)
 ```
 
@@ -251,6 +253,37 @@ use, are never chosen by content routing, and are listed by
 `GET /v1/models`. Without the llm native from `jolt llama`, or without the
 GGUF on disk, a thinker is listed as unavailable and a request for it is
 a 503.
+
+### Jev mode
+
+With thinking off, a thinker answers every question of a call in one
+pass. `native/llama.cpp` is thecodacus/llama.cpp's `parallel-decision`
+branch, and its decision engine does the work. The chat up to the state
+is decoded once and kept for later calls. The state is decoded once per
+call. Each question is then a branch forked from the state in the KV
+cache, and every branch is decoded in the same batch. Each branch holds
+the rest of that question's prompt, and its option ids are scored where
+their tokens diverge. The questions can't see each other, and the
+prompts are the same ones the per-question path uses. On MiniCPM5-2B,
+four questions over a short email take 207 ms instead of 539 ms, and
+1.2 s instead of 4.3 s over a 1.6k-token one. Accuracy is unchanged:
+75.0% on authored144 against 73.6% for the per-question path, and the
+same on the AG News / BoolQ / SST-5 trio (`bench/README.md`). Set
+`:jev false` for the per-question path.
+
+The engine runs on the handle's `:n-ctx` / `:n-seq-max` context (one
+sequence keeps the chat's opening, one the state, the rest are
+branches). A question whose options diverge at several token positions
+takes a branch per position, and branches beyond the pool are decoded in
+more passes. Hybrid models with recurrent layers work, but llama.cpp
+splits their batches per sequence length, so they gain less.
+Sliding-window models (Gemma) allocate their window per sequence, so
+keep `:n-seq-max` low for them.
+
+Text from the caller (the state, instructions and option descriptions)
+is escaped before it reaches either path: a control token's text such as
+`<|im_end|>` gets a zero-width space, so a state can't close its turn and
+write the next one (`lev.llm/escape`).
 
 ## Context: what the model sees
 
@@ -597,7 +630,7 @@ The one-question conveniences and the patterns, as a library (`lev.api`,
 ### As a binary
 
 `jolt binary` runs `jolt build -m lev.server -o lev-server` with the C
-kernels and llama.cpp from `jolt llama`, the pinned tag, static, Metal on
+kernels and llama.cpp from `jolt llama`, the pinned commit, static, Metal on
 mac, linked in. It then runs `./lev-server --self-test` against
 `golden/`. With a thinker configured, the self-test also asks it one
 question, which proves the link.
@@ -692,10 +725,15 @@ entries, and the build task branches on OS.
   `LEV_THREADS`. Attention calls `cblas_sgemm` through a pointer the
   Clojure side hands it, so the library links against no BLAS.
 - **llama.cpp**: `native/liblev_llm.dylib` / `.so` plus `liblev_llm.a`,
-  built by `jolt llama`. It clones llama.cpp at its pinned tag into
-  `native/llama.cpp` and builds it static with cmake, Metal with the
-  shader library embedded on mac and CPU elsewhere, behind
-  `native/lev_llm.c`, a flat C face jolt.ffi binds as `lev.llm`. It is
+  built by `jolt llama`. It fetches thecodacus/llama.cpp's
+  `parallel-decision` branch at its pinned commit (upstream b10435 plus
+  the decision engine) into `native/llama.cpp` and builds `llama` and
+  `llama-common` static with cmake, with no https or subprocess support,
+  Metal with the shader library embedded on mac and CPU elsewhere. They
+  sit behind `native/lev_llm.c` and `native/lev_decision.cpp` (the
+  engine's C face), which jolt.ffi binds as `lev.llm`. A checkout at
+  another commit is replaced. `LLAMA_CPP_SRC=path` fetches from a local
+  clone that has the commit. It is
   optional, since without it the encoders run and thinkers are
   unavailable. For `jolt build`, the archive is force-loaded and libc++
   plus the Metal, Foundation, MetalKit and Accelerate frameworks are
