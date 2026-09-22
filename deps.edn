@@ -17,8 +17,8 @@
         io.github.jolt-lang/time {:git/url "https://github.com/jolt-lang/time.git"
                                   :git/sha "abeee49974c2c4efa2fa75c96d9a379822c6815f"}
         jolt-lang/ring-chez-adapter {:git/url "https://github.com/jolt-lang/ring-chez-adapter"
-                                     :git/tag "v0.7.4"
-                                     :git/sha "ce4a7459dcaa33c760c0a7323026ae4c0d260bd4"}}
+                                     :git/tag "v0.7.7"
+                                     :git/sha "ff99a9d42761482851e40876c880ac4443cc4d96"}}
 
  ;; kernels: built from native/lev_kernels.c by the `kernels` task.
  ;; icu: NFC for the tokenizer. mac ships libicucore in the shared cache;
