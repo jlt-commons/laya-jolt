@@ -5,8 +5,8 @@
 ;;
 ;;   python3 bench/triad120.py                       # -> bench/data/triad120.jsonl
 ;;   jolt -M bench/triad.clj english
-;;   jolt -M bench/triad.clj minicpm5 false           # a thinker, thinking off
-;;   jolt -M bench/triad.clj minicpm5 true
+;;   jolt -M bench/triad.clj qwen3.5-4b               # a thinker, as configured (the escalation model answers at once)
+;;   jolt -M bench/triad.clj minicpm5 true            # thinking on
 ;;   jolt -M bench/triad.clj english --backend mlx --dtype f16
 (require '[lev.agent :as ag] '[lev.router :as router] '[lev.config :as cfg] '[lev.json :as json] '[clojure.string :as str])
 (def cases (mapv json/read-str (remove str/blank? (str/split-lines (slurp "bench/data/triad120.jsonl")))))

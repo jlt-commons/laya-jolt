@@ -7,8 +7,9 @@
   instructions and every option, thinks (or not), is handed the answer
   prefix, and each option is then scored by the log probability of its
   tokens — a softmax over those is the answer's distribution. On the
-  authored144 set (bench/) MiniCPM5-2B answers 95% with thinking and
-  75% without, against 61-76% for the encoders.
+  authored144 set (bench/) Qwen3.5-4B, the escalation model, answers 95%
+  without thinking; MiniCPM5-2B 95% with thinking and 75% without;
+  the encoders 61-67%.
 
   Thinking off, the call's questions go to lev.llm/jev together (Jev
   mode, :jev in the config): the same prompts, cut at the state, so the

@@ -1,6 +1,7 @@
 (ns lev.llm-test
   "lev.llm: llama.cpp behind native/lev_llm.c. The real model tests need a
-  GGUF (LEV_TEST_GGUF, else ~/src/models/MiniCPM5-2B-Q8_0.gguf) and the
+  GGUF (LEV_TEST_GGUF, else ~/src/models/Qwen_Qwen3.5-4B-Q8_0.gguf or
+  MiniCPM5-2B-Q8_0.gguf) and the
   llm native (jolt llama); without either they are skipped, and only the
   availability contract is checked."
   (:require [clojure.java.io :as io]
@@ -11,9 +12,12 @@
             [lev.think :as think]))
 
 (def gguf
-  (let [p (or (System/getenv "LEV_TEST_GGUF")
-              (str (System/getProperty "user.home") "/src/models/MiniCPM5-2B-Q8_0.gguf"))]
-    (when (.exists (io/file p)) p)))
+  "LEV_TEST_GGUF, else the escalation model (Qwen3.5-4B), else MiniCPM5-2B."
+  (let [home (System/getProperty "user.home")]
+    (some #(when (and % (.exists (io/file %))) %)
+          [(System/getenv "LEV_TEST_GGUF")
+           (str home "/src/models/Qwen_Qwen3.5-4B-Q8_0.gguf")
+           (str home "/src/models/MiniCPM5-2B-Q8_0.gguf")])))
 
 (def model
   "Loaded once for the suite: ~2.7 GB read, a second or two."

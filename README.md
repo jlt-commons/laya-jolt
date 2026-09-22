@@ -14,13 +14,17 @@ Two kinds of model sit behind Lev API:
 - **a thinker**: any GGUF chat model through a linked llama.cpp.
   It reads the state and the question, thinks, then has its
   candidate answers scored by their token log probabilities. On the
-  adversarial authored144 set in [bench/](bench/README.md), MiniCPM5-2B
-  answers 95% with thinking, against the encoders' 61 to 67%.
+  adversarial authored144 set in [bench/](bench/README.md), Qwen3.5-4B
+  answers 95% without thinking, in Jev mode at ~170 ms a question, against
+  the encoders' 61 to 67%. MiniCPM5-2B reaches the same 95% by thinking
+  first, in seconds.
 
 A request either names its model, like `"model": "english"` or
-`"model": "minicpm5"`, or gets routed by content to an encoder. A
+`"model": "qwen3.5-4b"`, or gets routed by content to an encoder. A
 confidence gate can answer on the encoder first, then escalate only what
-it is unsure about to the thinker. Either kind can be configured individually
+it is unsure about to the thinker. Qwen3.5-4B is the escalation model:
+behind the `english` encoder, a gate at 0.5 answers authored144 at 92.4%
+in 270 ms a case on average. Either kind can be configured individually
 in the configuration. You can configure just the encoders, or only a thinking model.
 
 Which one should answer, and when? The numbers below come from a
@@ -32,12 +36,13 @@ in [bench/](bench/README.md):
 |---|---|---|---|---|---|
 | encoder `english` | **97.5%** | 72.5% | 27.5% | 61% | **125** (CPU) |
 | encoder `english`, `debias` | | | | 64% | 199 (CPU) |
-| thinker, thinking off | 82.5% | 70.0% | 27.5% | 74% | 152 (GPU) |
-| thinker, thinking | 85.0% | **90.0%** | **37.5%** | **95%** | 3,000 (GPU) |
+| thinker Qwen3.5-4B, answering at once (the escalation model) | 87.5% | 87.5% | **47.5%** | **95%** | 174 (GPU) |
+| thinker MiniCPM5-2B, answering at once | 80.0% | 75.0% | 25.0% | 75% | 100 (GPU) |
+| thinker MiniCPM5-2B, thinking | 85.0% | **90.0%** | 37.5% | **95%** | 3,000 (GPU) |
 
-The encoder is the fast path. On routing-style traffic it beats the 2.5B
-model answering at once, at a fraction of the cost on a CPU, batching a
-whole workflow into one forward pass. Its confidence means is based on
+The encoder is the fast path. On routing-style traffic such as AG News it
+beats the generative models answering at once, at a fraction of the cost
+on a CPU, batching a whole workflow into one forward pass. Its confidence means is based on
 the calibration which the gate relies on. The thinker is used for
 the cases that need a deduction or an abstention.
 
@@ -97,25 +102,28 @@ error message.
 
 ### A thinker's model
 
-Any chat GGUF that llama.cpp can load works. Two are measured here.
-[openbmb/MiniCPM5-2B-GGUF](https://huggingface.co/openbmb/MiniCPM5-2B-GGUF)
-is a 2.5B Apache-2.0 model with a thinking mode in its chat template:
-`Q8_0` is 2.7 GB, `Q4_K_M` 1.6 GB. It scores 95% on authored144 thinking
-and 75% answering at once. Qwen3.5-4B
+Any chat GGUF that llama.cpp can load works. The escalation model is
+Qwen3.5-4B
 ([bartowski/Qwen_Qwen3.5-4B-GGUF](https://huggingface.co/bartowski/Qwen_Qwen3.5-4B-GGUF),
-`Q8_0` 4.5 GB) scores 95% answering at once, in 174 ms a question. It is
-the better Jev-mode model on every bench (`bench/README.md`), though its
-hybrid layers make a call with several questions slower. For a model
+Apache-2.0, `Q8_0` 4.5 GB). It scores 95% on authored144 answering at
+once, at 174 ms a question, and is the best Jev-mode model on every
+bench (`bench/README.md`). Its hybrid layers make a call with several
+questions slower: 533 ms for four. It can also think, but that has not
+been measured, so configure it with `:thinking false`.
+[openbmb/MiniCPM5-2B-GGUF](https://huggingface.co/openbmb/MiniCPM5-2B-GGUF)
+(2.5B, Apache-2.0, `Q8_0` 2.7 GB) is the measured thinking model: 95%
+with a thought, in seconds, and 75% answering at once. For a model
 without a thinking mode, such as Qwen2.5-Instruct, set `:thinks false`.
 
 ```
-hf download openbmb/MiniCPM5-2B-GGUF MiniCPM5-2B-Q8_0.gguf --local-dir ~/models
+hf download bartowski/Qwen_Qwen3.5-4B-GGUF Qwen_Qwen3.5-4B-Q8_0.gguf --local-dir ~/models
+hf download openbmb/MiniCPM5-2B-GGUF MiniCPM5-2B-Q8_0.gguf --local-dir ~/models   # optional: the thinking model
 ```
 
 Then name it in `~/.config/lev/config.edn` under `:thinkers`, covered
-below, or pass `--thinker ~/models/MiniCPM5-2B-Q8_0.gguf`, or set
-`LEV_THINKER`. The prompt format is ChatML with MiniCPM's `<think>`
-switch. Another model family needs its own template, which lives in
+below, or pass `--thinker ~/models/Qwen_Qwen3.5-4B-Q8_0.gguf`, or set
+`LEV_THINKER`. The prompt format is ChatML with the `<think>` switch both
+models' templates use. Another model family needs its own template, which lives in
 `lev.think/defaults`.
 
 ## Build and run
@@ -169,7 +177,7 @@ lives in `$LEV_CONFIG_DIR`, else `$XDG_CONFIG_HOME/lev`, else
  :checkpoints-home "/Users/me/models/laya"  ; the Hub checkpoints jolt prepare reads
  :encoders {"english" "/Users/me/models/lev-data"}   ; prepared encoders by name (else the :data layout); leave one out to not serve it
  :calibration {"english" "/Users/me/models/calibration-english.edn"}   ; refit temperatures per encoder (see Calibration)
- :thinkers {"minicpm5" {:model "/Users/me/models/MiniCPM5-2B-Q8_0.gguf"}}   ; generative models (see Thinkers); none = encoders only
+ :thinkers {"qwen3.5-4b" {:model "/Users/me/models/Qwen_Qwen3.5-4B-Q8_0.gguf" :thinking false}}   ; generative models (see Thinkers); none = encoders only
  :workflow-dirs ["/Users/me/src/decisions/workflows"]   ; extra workflow directories
  :port 8080 :host "127.0.0.1" :api-key "s3cret"        ; server defaults
  :max-loaded 2 :max-thinkers 1                          ; encoders / thinkers kept resident
@@ -240,7 +248,8 @@ numbers are in `bench/README.md`.
 ### Thinkers
 
 ```clojure
-{:thinkers {"minicpm5" {:model "/Users/me/models/MiniCPM5-2B-Q8_0.gguf"
+{:thinkers {"qwen3.5-4b" {:model "/Users/me/models/Qwen_Qwen3.5-4B-Q8_0.gguf" :thinking false}   ; the escalation model, answering at once
+            "minicpm5" {:model "/Users/me/models/MiniCPM5-2B-Q8_0.gguf"   ; a thinking model, every key at its default:
                         :thinking true          ; think before answering (a request can override)
                         :max-think-tokens 2048  ; the budget; the thought is closed when it runs out
                         :n-ctx 4096 :n-gpu-layers -1 :threads 0   ; llama.cpp: context, layers on the GPU (-1 all), threads (0 = its default)
@@ -253,8 +262,8 @@ numbers are in `bench/README.md`.
  :max-thinkers 1}                                ; resident at once (each is GBs)
 ```
 
-These are the defaults from `lev.think/defaults`, so `{:model path}` alone
-is a complete entry.
+The `minicpm5` entry spells out the defaults from `lev.think/defaults`,
+so `{:model path}` alone is a complete entry.
 
 Each entry defines a model name a request can ask for. `--thinker PATH`
 or `LEV_THINKER` adds one named `thinker`. Thinkers are loaded on first
@@ -423,7 +432,7 @@ jolt -M:run --list                                          # what is loaded, fr
 jolt -M:run refund-risk '{"text": "Charged twice, want my money back"}'
 jolt -M:run refund-risk @ticket.json --options '{"teams": {"billing": "money", "fraud": "chargebacks"}}'
 jolt -M:run refund-risk @ticket.json --constraints '[["implies", ["wants_refund", true], ["team", "billing"]]]'
-jolt -M:run refund-risk @ticket.json --model minicpm5                # on a thinker (--thinking false to answer at once)
+jolt -M:run refund-risk @ticket.json --model qwen3.5-4b              # on a thinker (--thinking true to think first)
 LEV_WORKFLOWS=./my-workflows jolt -M:run refund-risk @ticket.json   # only that directory
 ```
 
@@ -521,8 +530,9 @@ the encoders' answers. A thinker answers in the same shapes without
 `action`, adds a `"thinking": {"enabled", "tokens", "max_tokens"}`
 report, and on request, with `"thought": true`, each answer's reasoning
 under `"thought"`. `"thinking": false` asks it to answer at once (Jev
-mode), which lands around 100 ms on a GPU and scores 75% on authored144
-against 95% with thinking.
+mode). On a GPU Qwen3.5-4B does that in about 170 ms a question at 95% on
+authored144. MiniCPM5-2B takes about 100 ms but scores 75%, and needs
+its thinking to reach 95%.
 
 `/v1/systemone/batch` answers several states against the same questions.
 Each state gets its own content routing on the encoders. A thinker with
@@ -536,7 +546,7 @@ infeasible state fails the whole batch.
 
 ```
 POST /v1/systemone {"state": ..., "questions": {...}, "model": "minicpm5", "thinking": true, "thought": false}
-POST /v1/systemone {"state": ..., "questions": {...}, "escalate": {"model": "minicpm5", "threshold": 0.8, "thinking": true}}
+POST /v1/systemone {"state": ..., "questions": {...}, "escalate": {"model": "qwen3.5-4b", "threshold": 0.8}}
                    -> the encoder's answers, the ones below the threshold replaced by the thinker's, plus
                       "escalation": {"threshold", "model", "escalated": [ids], "usage": the thinker's}
 POST /v1/patterns/confidence-gate   systemone body + "threshold"          -> {"automatic": {...}, "escalate": {...}, "response": {...}}
@@ -544,7 +554,11 @@ POST /v1/patterns/composite-score   systemone body + "weights" {id: w}    -> {"s
 POST /v1/patterns/two-stage-choice  {"state", "taxonomy": {category: {option: description}}} -> {"category", "choice", "combined_confidence", ...}
 ```
 
-`escalate` also works on a workflow request, and constraints then decide
+On authored144, escalating the `english` encoder's answers to Qwen3.5-4B
+lands at 89.6% with a threshold of 0.3 (99 of 144 up, 234 ms a case on
+average), 92.4% at 0.5 (126 up, 270 ms) and 95.1% from 0.7. This is a set
+where the encoder is rarely sure, so on routine traffic far fewer cases
+go up. `escalate` also works on a workflow request, and constraints then decide
 over the merged answers. `threshold` is one number for every question
 type, or per type as `{"choice": 0.8, "score": 0.8, "noul": 0.9}`. A
 noul's confidence is `max(p, 1 − p)`, never below 0.5. On yes/no reading
@@ -633,16 +647,16 @@ The one-question conveniences and the patterns, as a library (`lev.api`,
 
 ```clojure
 (require '[lev.api :as api] '[lev.patterns :as pat] '[lev.router :as router])
-(def rt (router/make-router {:data "data" :thinkers {"minicpm5" {:model "/Users/me/models/MiniCPM5-2B-Q8_0.gguf"}}}))
+(def rt (router/make-router {:data "data" :thinkers {"qwen3.5-4b" {:model "/Users/me/models/Qwen_Qwen3.5-4B-Q8_0.gguf" :thinking false}}}))
 
 (api/decide rt "Database replication lag exceeded 45 seconds." {"infrastructure" "servers, network" "billing" "invoices"})
 ;; => {"type" "choice" "choice" "infrastructure" "probabilities" {...} "confidence" 0.83 "action" {...}}
 (api/judge rt "Connection pool exhausted; handshakes timing out." "Is this blocking customers?")   ; => 0.9412
 (api/rate rt "Memory at 98%, OOM killer active." ["nominal" "degraded" "critical"])                ; => the score answer
-(api/decide rt state choices instructions {:model "minicpm5" :thinking true})                      ; the thinker
+(api/decide rt state choices instructions {:model "qwen3.5-4b"})                                  ; the thinker
 
 (pat/confidence-gate rt state questions {:threshold 0.85})           ; {"automatic" .. "escalate" .. "response" ..}
-(pat/escalate rt state questions {:threshold 0.8 :model "minicpm5"}) ; the gate, with the escalated questions re-asked
+(pat/escalate rt state questions {:threshold 0.8 :model "qwen3.5-4b"}) ; the gate, with the escalated questions re-asked
 (pat/route rt event (api/choice "Dispute action?" {"refund" "" "escalate" ""}) {"refund" process-refund "escalate" notify-fraud} {})
 (pat/composite-score rt telemetry questions {:weights {"severity" 2.0 "is_threat" 3.0}})   ; {"score" 0.91 ...}
 (pat/two-stage-choice rt "Postgres replica lag" {"cloud" {"aws" "..." "gcp" "..."} "database" {"postgres" "..." "redis" "..."}} {})
@@ -683,7 +697,8 @@ adversarial three-way decisions:
 ```
 jolt -M bench/authored144.clj                                   # english: 61%, ~120 ms a case
 jolt -M bench/authored144.clj --model typed-decisions            # 67%
-jolt -M bench/authored144.clj --model minicpm5 --thinking false  # 74%, ~150 ms a case (Metal)
+jolt -M bench/authored144.clj --model qwen3.5-4b                 # 95%, ~175 ms a case (Metal), answering at once
+jolt -M bench/authored144.clj --model minicpm5 --thinking false  # 75%, ~100 ms a case (Metal)
 jolt -M bench/authored144.clj --model minicpm5                   # 95%, seconds a case
 jolt -M bench/authored144.clj --debias                            # english with option-rotation averaging: 64%
 jolt -M bench/triad.clj english                                   # AG News / BoolQ / SST-5, with ECE and what a gate keeps

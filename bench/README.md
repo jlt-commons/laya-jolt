@@ -300,6 +300,21 @@ separate passes: four questions take 533 ms against 174 ms for one. The
 catalog layout (short, equal branches) runs 8 states in 1,244 ms instead
 of 4,197 ms, but scores 72.9% on authored144, so it stays opt-in.
 
+Escalation (`lev.patterns/escalate`), simulated from per-case results:
+the `english` encoder answers first, and the cases below a threshold on
+its confidence take the thinker's answer instead.
+
+| gate | escalated | to Qwen3.5-4B (answering at once) | to MiniCPM5-2B (answering at once) |
+|---|---|---|---|
+| 0.3 | 99 / 144 | 89.6%, 234 ms a case on average | 75.7%, 178 ms |
+| 0.5 | 126 / 144 | **92.4%**, 270 ms | 74.3%, 196 ms |
+| 0.7 | 141 / 144 | 95.1%, 289 ms | 75.0%, 207 ms |
+
+Qwen3.5-4B is the escalation model from here on (README, config
+examples). MiniCPM5-2B escalated with thinking gets 88.9% at 0.5, at
+seconds a case (above). Qwen3.5-4B with its own thinking on has not been
+measured.
+
 Not ported from SemIf: its per-workload temperature scaling. `lev.calibrate`
 refits the encoders only. At ECE 0.034 Qwen3.5-4B needs it least.
 
