@@ -255,6 +255,21 @@
   ([agent state questions] (system-one agent state questions nil))
   ([agent state questions opts] (system-one* agent state questions opts)))
 
+(defmulti system-one-batch*
+  "The engine behind system-one-batch, by the agent's :kind; the default
+  answers the states one by one."
+  (fn [agent _states _questions _opts] (:kind agent :encoder)))
+
+(defmethod system-one-batch* :default [agent states questions opts]
+  (mapv #(system-one* agent % questions opts) states))
+
+(defn system-one-batch
+  "Several states against the same questions: a vector of what
+  system-one answers for each, in order. A thinker in Jev mode decides
+  them in one pass (lev.think); anything else answers them one by one."
+  ([agent states questions] (system-one-batch agent states questions nil))
+  ([agent states questions opts] (system-one-batch* agent (vec states) questions opts)))
+
 (defn with-calibration
   "The agent with refitted temperatures (lev.calibrate's {:temperature
   [per type] :temperature-by-options {bucket T}}) over the checkpoint's

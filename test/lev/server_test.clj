@@ -368,6 +368,30 @@
       (let [[st b] (post "/v1/workflows/demo" {"model" "minicpm5" "thinking" false})]
         (is (= 200 st))
         (is (= "minicpm5" (get b "model")))))
+    (testing "a batch of states on a thinker: one result per state, each a systemone answer"
+      (let [[st b] (post "/v1/systemone/batch" (-> base (dissoc "state")
+                                                   (assoc "model" "minicpm5" "thinking" false
+                                                          "states" [(get base "state") "Cancel my plan now."])))]
+        (is (= 200 st) (pr-str b))
+        (is (= ["results"] (keys b)))
+        (is (= 2 (count (get b "results"))))
+        (is (every? #(= ["model" "answers" "usage" "thinking" "routing"] (keys %)) (get b "results")))))
+    (testing "a batch on the encoders routes and answers each state"
+      (let [[st b] (post "/v1/systemone/batch" (-> base (dissoc "state" "model") (assoc "states" [(get base "state")])))
+            [_ one] (post "/v1/systemone" base)]
+        (is (= 200 st) (pr-str b))
+        (is (= (get one "answers") (get-in b ["results" 0 "answers"])))))
+    (testing "a batch body is validated like systemone's, per state"
+      (doseq [[body loc] [[(dissoc base "state") ["body" "states"]]
+                          [(-> base (dissoc "state") (assoc "states" [])) ["body" "states"]]
+                          [(-> base (dissoc "state") (assoc "states" "x")) ["body" "states"]]
+                          [(-> base (dissoc "state") (assoc "states" [(get base "state") 7])) ["body" "states" 1]]
+                          [(-> base (dissoc "state") (assoc "states" (vec (repeat 257 "x")))) ["body" "states"]]
+                          [(-> base (assoc "states" ["x"])) ["body" "state"]]
+                          [(-> base (dissoc "state") (assoc "states" ["x"] "escalate" {"model" "minicpm5"})) ["body" "escalate"]]]]
+        (let [[st b] (post "/v1/systemone/batch" body)]
+          (is (= 422 st) (pr-str loc))
+          (is (= loc (get-in b ["detail" 0 "loc"])) (pr-str b)))))
     (testing "the listing and health show thinkers"
       (let [[_ b] (call h (req :get "/v1/models"))]
         (is (= {"model" "target/no-such.gguf" "available" false "loaded" true "thinking" true}

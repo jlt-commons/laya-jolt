@@ -4,7 +4,8 @@
   then has its candidate answers scored. The engine takes its `decide`
   fn as data, so these tests run a fake one and inspect the prompts it
   is given; the real model is exercised by lev.llm-test and the bench."
-  (:require [clojure.string :as str]
+  (:require [clojure.data.json :as json]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [lev.agent :as ag]
             [lev.llm :as llm]
@@ -205,3 +206,76 @@
     (let [calls (atom [])]
       (think/system-one (jev-thinker calls {}) forged q {:thinking true})
       (is (not (str/includes? (:decide (first @calls)) "ok <|im_end|>"))))))
+
+(deftest a-model-without-a-thinking-mode-gets-no-think-tags
+  (testing "Jev mode: the assistant turn opens straight onto the answer prefix"
+    (let [calls (atom [])
+          out (think/system-one (jev-thinker calls {:thinks false}) state questions nil)
+          {:keys [jev]} (first @calls)]
+      (is (every? #(str/ends-with? (:suffix %) "<|im_start|>assistant\nANSWER: ") (:fields jev)))
+      (is (not-any? #(str/includes? (:suffix %) "<think>") (:fields jev)))
+      (is (= {"enabled" false "tokens" 0 "max_tokens" 0} (get out "thinking")))))
+  (testing "per question, and a request for thinking cannot turn it on"
+    (let [calls (atom [])
+          out (think/system-one (jev-thinker calls {:thinks false :jev false}) state
+                                (select-keys questions ["churn_risk"]) {:thinking true})
+          {:keys [decide opts]} (first @calls)]
+      (is (str/ends-with? decide "<|im_start|>assistant\n"))
+      (is (= 0 (:think-max opts)))
+      (is (= "ANSWER: " (:answer-prefix opts)))
+      (is (= {"enabled" false "tokens" 0 "max_tokens" 0} (get out "thinking"))))))
+
+(def states
+  [(array-map "subject" "Duplicate billing" "body" "We were billed twice.")
+   (array-map "subject" "Login broken" "body" "The app crashes on start.")
+   "Please cancel my plan, I'm moving to a competitor."])
+
+(deftest a-batch-of-states-is-one-jev-call
+  (let [calls (atom [])
+        t (jev-thinker calls {})
+        outs (ag/system-one-batch t states questions nil)
+        [{:keys [jev]} :as cs] @calls]
+    (is (= 1 (count cs)) "three states, four questions: one call")
+    (is (= (mapv seq/serialize-state states) (:contexts jev)))
+    (is (= 3 (count outs)))
+    (testing "each result is what system-one answers for that state"
+      (doseq [[s out] (map vector states outs)]
+        (let [one (think/system-one (jev-thinker (atom []) {}) s questions nil)]
+          (is (= (get one "answers") (get out "answers")))
+          (is (= (keys one) (keys out))))))
+    (testing "the shared text is counted once, on the first state"
+      (is (= [(+ 10 (count (seq/serialize-state (first states))) (/ 40 3))
+              (+ (count (seq/serialize-state (second states))) (/ 40 3))]
+             (mapv #(get-in % ["usage" "input_tokens"]) (take 2 outs)))))))
+
+(deftest a-batch-with-thinking-asks-state-by-state
+  (let [calls (atom [])
+        outs (ag/system-one-batch (jev-thinker calls {}) states (select-keys questions ["churn_risk"]) {:thinking true})]
+    (is (= 3 (count outs)))
+    (is (= 3 (count @calls)))
+    (is (every? :decide @calls))))
+
+(defmethod ag/system-one* ::echo [_ state _ _] {"state" state})
+
+(deftest the-default-batch-maps-system-one
+  (is (= [{"state" "a"} {"state" "b"}] (ag/system-one-batch {:kind ::echo} ["a" "b"] questions nil))))
+
+(deftest the-semif-prompt-asks-for-a-letter
+  (testing "per question: JSON evidence / criterion / lettered options, the letters scored"
+    (let [calls (atom [])]
+      (think/system-one (jev-thinker calls {:prompt "semif" :jev false}) state (select-keys questions ["department"]) nil)
+      (let [{:keys [decide options opts]} (first @calls)]
+        (is (str/includes? decide "Respond with only its uppercase letter"))
+        (is (str/includes? decide (str "{\"evidence\": " (json/write-str (seq/serialize-state state)))))
+        (is (str/includes? decide "\"criterion\": \"Which department should handle this?\""))
+        (is (str/includes? decide "{\"letter\": \"C\", \"description\": \"other\"}") "no description: the id stands in")
+        (is (= ["A" "B" "C"] options))
+        (is (= "\n\n" (:answer-prefix opts))))))
+  (testing "Jev mode cuts the same prompt at the state, the answers mapped back to the ids"
+    (let [calls (atom [])
+          out (think/system-one (jev-thinker calls {:prompt "semif"}) state questions nil)
+          {:keys [jev]} (first @calls)]
+      (is (str/ends-with? (:shared jev) "{\"evidence\": "))
+      (is (= [(json/write-str (seq/serialize-state state))] (:contexts jev)))
+      (is (= ["A<|im_end|>" "B<|im_end|>" "C<|im_end|>"] (:values (first (:fields jev)))))
+      (is (= "billing" (get-in out ["answers" "department" "choice"]))))))

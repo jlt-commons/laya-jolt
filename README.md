@@ -97,10 +97,16 @@ error message.
 
 ### A thinker's model
 
-Any chat GGUF that llama.cpp can load works. The one measured here is
-[openbmb/MiniCPM5-2B-GGUF](https://huggingface.co/openbmb/MiniCPM5-2B-GGUF),
-a 2.5B Apache-2.0 model with a thinking mode in its chat template. `Q8_0`
-is 2.7 GB, `Q4_K_M` 1.6 GB.
+Any chat GGUF that llama.cpp can load works. Two are measured here.
+[openbmb/MiniCPM5-2B-GGUF](https://huggingface.co/openbmb/MiniCPM5-2B-GGUF)
+is a 2.5B Apache-2.0 model with a thinking mode in its chat template:
+`Q8_0` is 2.7 GB, `Q4_K_M` 1.6 GB. It scores 95% on authored144 thinking
+and 75% answering at once. Qwen3.5-4B
+([bartowski/Qwen_Qwen3.5-4B-GGUF](https://huggingface.co/bartowski/Qwen_Qwen3.5-4B-GGUF),
+`Q8_0` 4.5 GB) scores 95% answering at once, in 174 ms a question. It is
+the better Jev-mode model on every bench (`bench/README.md`), though its
+hybrid layers make a call with several questions slower. For a model
+without a thinking mode, such as Qwen2.5-Instruct, set `:thinks false`.
 
 ```
 hf download openbmb/MiniCPM5-2B-GGUF MiniCPM5-2B-Q8_0.gguf --local-dir ~/models
@@ -240,7 +246,10 @@ numbers are in `bench/README.md`.
                         :n-ctx 4096 :n-gpu-layers -1 :threads 0   ; llama.cpp: context, layers on the GPU (-1 all), threads (0 = its default)
                         :temperature 0.0 :top-p 0.95 :min-p 0.0 :seed 42     ; the thought: greedy by default (95% vs 91% sampled on authored144)
                         :jev true               ; thinking off: every question in one pass (Jev mode, below)
-                        :split-boundary true}}  ; Jev mode: option ids start their own token (75% vs 68% on authored144)
+                        :split-boundary true    ; Jev mode: option ids start their own token (75% vs 68% on authored144)
+                        :thinks true            ; false: no thinking mode (no <think> tags; thinking stays off)
+                        :prompt "lev"           ; or "semif": SemIf's JSON payload with lettered options
+                        :layout "question"}}    ; or "catalog": questions before the state (fast batches, much less accurate)
  :max-thinkers 1}                                ; resident at once (each is GBs)
 ```
 
@@ -494,6 +503,8 @@ POST /v1/systemone        Authorization: Bearer <key>   (only if a key is config
     "routing": {"model": "english", "repo": "convaiinnovations/laya", "reason": "English Latin text",
                 "detection": {...}, "workflow": null}}
 
+POST /v1/systemone/batch  the same body with "states": [1-256 states] instead of "state", no "escalate"
+                          -> {"results": [what /v1/systemone answers for each state, in order]}
 POST /v1/route            same body, questions optional -> the routing decision alone (nothing loaded or run)
 POST /v1/workflows/<name> {"input": <anything the workflow's state fn takes>, "options"?: {...}, "constraints"?: [...],
                            "on_infeasible"?: ..., "model"?/"lang"?/"task"?}
@@ -509,9 +520,19 @@ Questions and answers score and noul, plus the `action.act_probability` extensio
 the encoders' answers. A thinker answers in the same shapes without
 `action`, adds a `"thinking": {"enabled", "tokens", "max_tokens"}`
 report, and on request, with `"thought": true`, each answer's reasoning
-under `"thought"`. `"thinking": false` asks it to answer at once, which
-lands around 150 ms on a GPU and scores 74% on authored144 against 95%
-with thinking.
+under `"thought"`. `"thinking": false` asks it to answer at once (Jev
+mode), which lands around 100 ms on a GPU and scores 75% on authored144
+against 95% with thinking.
+
+`/v1/systemone/batch` answers several states against the same questions.
+Each state gets its own content routing on the encoders. A thinker with
+thinking off hands every state to one engine call, which decodes the
+states together and scores every question on every state in the same
+passes. Grouping only saves time when each question's own tokens are few,
+which is the `:layout "catalog"` thinker option. On MiniCPM5 that layout
+costs 26 points on authored144, so the default layout gains little from a
+batch (`bench/README.md`). With `"on_infeasible": "raise"`, one
+infeasible state fails the whole batch.
 
 ```
 POST /v1/systemone {"state": ..., "questions": {...}, "model": "minicpm5", "thinking": true, "thought": false}

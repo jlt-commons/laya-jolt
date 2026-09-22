@@ -14,6 +14,11 @@
                               0.8 or {type: t}, \"thinking\"?}: the answers below the
                               threshold are re-asked on the thinker and the
                               body carries an \"escalation\" report (lev.patterns)
+    POST /v1/systemone/batch  the same body with \"states\" [...] (1-256) in place
+                              of \"state\" -> {\"results\" [one systemone answer per
+                              state, in order]}; a thinker with thinking off
+                              decides them all in one pass (Jev mode), the
+                              encoders route and answer each; no escalate
     POST /v1/route            same body, questions optional -> the routing
                               decision alone, nothing loaded or run
     POST /v1/patterns/confidence-gate   systemone body + \"threshold\"? -> {\"automatic\" \"escalate\" \"response\"}
@@ -275,6 +280,53 @@
       (unprocessable details)
       (json-response 200 (predict rt lock (get body "state") (get body "questions") (routing-opts body) 0)))))
 
+(def max-batch-states
+  "States one /v1/systemone/batch call may carry."
+  256)
+
+(defn- check-states [body]
+  (let [states (get body "states")]
+    (cond
+      (contains? body "state")
+      [(detail ["body" "state"] "a batch takes states (a list), not state" "value_error")]
+      (not (sequential? states))
+      [(detail ["body" "states"] "states is required: a list of states" "value_error")]
+      (empty? states)
+      [(detail ["body" "states"] "states must not be empty" "value_error")]
+      (> (count states) max-batch-states)
+      [(detail ["body" "states"] (str "at most " max-batch-states " states a call") "value_error")]
+      :else
+      (keep-indexed (fn [i s]
+                      (when-not (or (string? s) (map? s) (sequential? s))
+                        (detail ["body" "states" i] "each state is a string, object or array" "value_error")))
+                    states))))
+
+(defn systemone-batch
+  "Answer one parsed /v1/systemone/batch body: {\"results\" [...]}, each
+  what /v1/systemone answers for that state. Inference is serialized on
+  lock."
+  [rt lock body]
+  (let [details (if-not (map? body)
+                  [(detail ["body"] "request body must be a JSON object" "type_error")]
+                  (vec (concat (check-states body)
+                               (when (contains? body "escalate")
+                                 [(detail ["body" "escalate"] "escalate is not available on a batch" "value_error")])
+                               (check-routing-fields rt body)
+                               (check-constraints body)
+                               (check-questions (get body "questions")))))]
+    (if (seq details)
+      (unprocessable details)
+      (let [{:keys [model lang task constraints on-infeasible thinking thought debias]} (routing-opts body)]
+        (json-response 200 {"results" (try (locking lock
+                                             (router/predict-batch rt (get body "states") (get body "questions")
+                                                                   :model model :lang lang :task task
+                                                                   :constraints constraints :on-infeasible on-infeasible
+                                                                   :thinking thinking :thought thought :debias debias))
+                                           (catch Exception e
+                                             (if (= :invalid-constraint (:type (ex-data e)))
+                                               (throw (ex-info (ex-message e) (assoc (ex-data e) :offset 0)))
+                                               (throw e))))})))))
+
 (defn route-only
   "POST /v1/route: the decision for a body, without loading or running."
   [rt body]
@@ -427,6 +479,8 @@
         real [{:path "/health" :method :get :response (fn [_] (health rt workflows))}
               {:path "/v1/systemone" :method :post
                :response (guard (json-in #(systemone rt lock %) false))}
+              {:path "/v1/systemone/batch" :method :post
+               :response (guard (json-in #(systemone-batch rt lock %) false))}
               {:path "/v1/route" :method :post
                :response (guard (json-in #(route-only rt %) false))}
               {:path "/v1/models" :method :get :response (guard (fn [_] (models rt)))}

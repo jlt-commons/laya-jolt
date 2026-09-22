@@ -245,6 +245,64 @@ call, and the four questions' ~40-token tails together. One question on a
 long state is the state's prefill either way. Through `lev-server`, three
 questions on a short ticket answer in 170 ms warm.
 
+Several states against the same questions (`/v1/systemone/batch`,
+`lev.agent/system-one-batch`) go to the engine as one call. With this
+layout it saves little: 8 short states take 1,671 ms against 1,681 ms one
+call at a time. Every question's ~50-token tail is decoded again for every
+state, so the work is compute-bound either way. The catalog layout
+(`:layout "catalog"`: the questions go in the cached text before the
+state, and each field is a short `ANSWER <n>: `) is what batching is for.
+It takes 565 ms for the 8 states and 104 ms for four questions on one,
+but authored144 falls to 48.6% (balanced 43.3%). A batched state's
+probabilities match the same state answered alone to within 0.007
+(`llm-test`): llama.cpp is not batch-invariant.
+
+## Other models in Jev mode, and SemIf (2026-09-22)
+
+Same benches, thinking off, Metal. Qwen2.5-1.5B-Instruct is what
+harshatheg/Qwen-2.5-1B-RLCD runs: that repo holds no weights, only the
+parallel-decoding code over the stock model. Qwen3.5-4B is the model SemIf
+(github.com/TheoLeeCJ/SemIf, #2 on JevBench v1.3.0) uses. Both run as
+thinkers: Qwen2.5 with `:thinks false`, since it has no thinking mode,
+and Qwen3.5 with lev's ChatML (its template's no-thinking turn is the same
+`<think>\n\n</think>\n\n`).
+
+| model, prompt | authored144 | balanced | ECE | perturbations108 | trio | 4 questions, short state |
+|---|---|---|---|---|---|---|
+| MiniCPM5-2B Q8, lev prompt (above) | 75.0% (108) | 71.5% | 0.174 | 61.1% | 60.0% (72) | 207 ms |
+| MiniCPM5-2B Q8, SemIf prompt (`:prompt "semif"`) | 64.6% (93) | 63.1% | 0.234 | | | |
+| Qwen2.5-1.5B-Instruct Q8, lev prompt, the engine's own cut | 59.7% (86) | 65.5% | 0.305 | 69.4% | 60.0% (72) | 131 ms |
+| Qwen2.5-1.5B-Instruct Q8, lev prompt, lev's cut | 56.3% (81) | 61.7% | 0.418 | | | |
+| Qwen2.5-1.5B-Instruct Q8, the RLCD repo's prompt | 54.2% (78) | | | | | |
+| **Qwen3.5-4B Q8, lev prompt** | **95.1% (137)** | **93.3%** | **0.034** | **79.6%** | **74.2% (89)** | 533 ms |
+| Qwen3.5-4B Q8, lev prompt, per question (`:jev false`) | 95.1% (137) | 93.3% | 0.034 | | | |
+| Qwen3.5-4B Q8, SemIf prompt | 79.2% (114) | 78.7% | 0.069 | | | |
+| Qwen3.5-4B Q8, SemIf prompt, per question | 80.6% (116) | 80.1% | 0.058 | | | |
+| SemIf's own scorer, its llama.cpp backend, the same Q8 GGUF | 80.6% (116) | 79.8% | 0.062 | | | 1.9 s a case (CPU) |
+| SemIf's committed BF16 predictions (RTX 3090) | 80.6% (116) | 80.0% | 0.068 | | | |
+
+The last three rows answer whether lev or the model was the limit. SemIf's
+own code on the same GGUF gets 116/144, what lev gets with its prompt, and
+what SemIf published from BF16. The SemIf row's balanced accuracy uses
+lev's metric (mean recall per label); SemIf reports 0.813 by its own. lev's
+prompt adds 14.5 points on the same model. Most of that is
+candidate_selection: 48/48 with lev's prompt, 32/48 with SemIf's. There
+the options are candidates named A and B, which SemIf relabels with its
+own letters. Qwen3.5-4B with thinking off matches MiniCPM5 with thinking
+(95.1%) at 174 ms a question instead of 3 s.
+
+Jev mode and the per-question path agree case for case on Qwen3.5 (the
+lev-prompt rows), so `llama_memory_seq_cp` on its hybrid memory holds up.
+SemIf's llama.cpp backend avoids it and serializes whole states. What
+the hybrid costs is batching. Its recurrent layers need every sequence in a
+ubatch to be the same length, so llama.cpp splits the branches into
+separate passes: four questions take 533 ms against 174 ms for one. The
+catalog layout (short, equal branches) runs 8 states in 1,244 ms instead
+of 4,197 ms, but scores 72.9% on authored144, so it stays opt-in.
+
+Not ported from SemIf: its per-workload temperature scaling. `lev.calibrate`
+refits the encoders only. At ECE 0.034 Qwen3.5-4B needs it least.
+
 ## Measuring a change: `bench/paired.clj`
 
 A sequential before/after (two processes, one after the other) confounds

@@ -6,7 +6,9 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [lev.llm :as llm]))
+            [lev.agent :as ag]
+            [lev.llm :as llm]
+            [lev.think :as think]))
 
 (def gguf
   (let [p (or (System/getenv "LEV_TEST_GGUF")
@@ -146,3 +148,28 @@
                                         :fields [{:suffix "ANSWER: " :values ["same" "same"]}]})))
       (is (= 1 (count (:probs (llm/jev m {:shared ticket-shared :contexts ["The parcel never arrived."]
                                            :fields ticket-fields}))))))))
+
+(deftest a-batch-answers-what-each-state-answers-alone
+  (when (and (llm/available?) gguf)
+    (let [t (think/thinker {:name "t" :model gguf :thinking false :n-ctx 2048 :n-seq-max 32})
+          qs (array-map "team" {"type" "choice" "instructions" "Which team should handle this?"
+                                "criteria" (array-map "billing" "charges" "shipping" "deliveries" "returns" "exchanges")}
+                        "angry" {"type" "noul" "instructions" "Is the customer angry?"}
+                        "urgency" {"type" "score" "instructions" "How urgent?" "criteria" ["low" "medium" "high"]})
+          states ["My package is three weeks late!!! This is outrageous."
+                  "You billed my card twice this month."
+                  "Could I exchange the shoes for a larger size?"]]
+      (try
+        (let [batch (ag/system-one-batch t states qs nil)
+              alone (mapv #(ag/system-one t % qs nil) states)
+              probs (fn [out] (mapcat (fn [[_ a]] (if-let [p (get a "probabilities")] (vals p) [(get a "noul")]))
+                                      (get out "answers")))]
+          (is (= 3 (count batch)))
+          ;; llama.cpp is not batch-invariant: other states in the batch
+          ;; change the kernels' shapes, which moves a probability by up to
+          ;; ~0.007 here (measured); the answers are the same ones
+          (doseq [[b a] (map vector batch alone)]
+            (is (= (keys (get b "answers")) (keys (get a "answers"))))
+            (is (every? #(< (Math/abs (double %)) 0.02) (map - (probs b) (probs a)))
+                (pr-str (probs b) (probs a)))))
+        (finally ((:close t) t))))))

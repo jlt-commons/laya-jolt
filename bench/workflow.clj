@@ -11,7 +11,9 @@
 
   --model may name a thinker (config.edn :thinkers, LEV_THINKER): then
   the calls go through lev.think, with thinking off unless the thinker's
-  config turns it on, and the state tokenization lines are left out.
+  config turns it on, and the state tokenization lines are left out;
+  two more rows time 8 short states (the email with \"Record i: \" in
+  front) one call each against one lev.agent/system-one-batch.
 
   No answers change under either optimization (golden/ pins them); this
   measures the time they take."
@@ -57,6 +59,10 @@
       (row "tokenize the long state once" (timed #(seq/encode-state tok wl/long-state) iterations warmup)))
     (row "4 questions, short state" (timed #(ag/system-one agent wl/short-state wl/questions) iterations warmup))
     (row "4 questions, long state" (timed #(ag/system-one agent wl/long-state wl/questions) iterations warmup))
-    (row "1 question (department), long state" (timed #(ag/system-one agent wl/long-state (select-keys wl/questions ["department"])) iterations warmup))))
+    (row "1 question (department), long state" (timed #(ag/system-one agent wl/long-state (select-keys wl/questions ["department"])) iterations warmup))
+    (when (= :thinker (:kind agent))
+      (let [states (wl/variants wl/short-state 8)]
+        (row "8 short states, one call each" (timed #(mapv (fn [s] (ag/system-one agent s wl/questions)) states) iterations warmup))
+        (row "8 short states, one batch" (timed #(ag/system-one-batch agent states wl/questions) iterations warmup))))))
 
 (apply -main *command-line-args*)

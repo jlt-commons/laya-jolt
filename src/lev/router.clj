@@ -373,3 +373,21 @@
                             (some? thought) (assoc :thought thought)
                             (some? debias) (assoc :debias debias)))
            "routing" d)))
+
+(defn predict-batch
+  "`predict` for several states against the same questions, a vector in
+  order. A thinker (named: thinkers are never content-routed) gets them
+  all in one lev.agent/system-one-batch, which is one pass in Jev mode;
+  otherwise every state is routed and answered on its own, since content
+  routing looks at the state."
+  [router states questions & {:keys [model constraints on-infeasible thinking thought debias] :as opts}]
+  (if (and (some? model) (thinker? router model))
+    (let [d (resolve-decision router (route router (first states) questions :model model) true)
+          agent (load-model router (get d "model"))]
+      (mapv #(assoc % "routing" d)
+            (ag/system-one-batch agent states questions
+                                 (cond-> {:constraints constraints :on-infeasible on-infeasible}
+                                   (some? thinking) (assoc :thinking thinking)
+                                   (some? thought) (assoc :thought thought)
+                                   (some? debias) (assoc :debias debias)))))
+    (mapv #(apply predict router % questions (mapcat identity opts)) states)))
