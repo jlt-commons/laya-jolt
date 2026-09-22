@@ -275,7 +275,7 @@ a 503.
 ### Jev mode
 
 With thinking off, a thinker answers every question of a call in one
-pass. `native/llama.cpp` is thecodacus/llama.cpp's `parallel-decision`
+pass. `native/llama.cpp` is [thecodacus/llama.cpp's](https://github.com/thecodacus/llama.cpp/tree/parallel-decision) `parallel-decision`
 branch, and its decision engine does the work. The chat up to the state
 is decoded once and kept for later calls. The state is decoded once per
 call. Each question is then a branch forked from the state in the KV

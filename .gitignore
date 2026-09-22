@@ -10,6 +10,7 @@ __pycache__/
 target/
 .jolt/
 .clj-kondo/
+.cpcache/
 .lsp/
 *.a
 native/llama.cpp/
